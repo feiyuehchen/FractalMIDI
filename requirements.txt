@@ -1,0 +1,10 @@
+torch
+numpy
+symusic
+pytorch-lightning
+matplotlib
+pillow>=9.1.0  # Required for Image.Resampling in TensorBoard
+torchvision
+scipy
+timm
+tensorboard
