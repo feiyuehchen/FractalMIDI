@@ -4,7 +4,7 @@ Simplified version that uses the complete hierarchical FractalGen architecture.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import math
 
 import torch
@@ -34,30 +34,68 @@ class OptimizerConfig:
 class SchedulerConfig:
     """Learning rate scheduler configuration."""
     schedule_type: str = "cosine"  # cosine, linear, or constant
-    warmup_epochs: int = 5
+    warmup_steps: int = 2000
     min_lr: float = 1e-6
+
+
+@dataclass
+class ModelConfig:
+    """Configuration for the FractalGen piano model."""
+    attn_dropout: float = 0.0
+    proj_dropout: float = 0.0
+    guiding_pixel: bool = False
+    num_conds: int = 5
+    v_weight: float = 1.0
+    grad_checkpointing: bool = False
+    generator_type_list: Tuple[str, ...] = field(default_factory=lambda: ("mar", "mar", "mar", "mar"))
+    scan_order: str = 'row_major'
+    mask_ratio_loc: float = 1.0  # Mean mask ratio for MAR (1.0 = mask 100%, 0.5 = mask 50%)
+    mask_ratio_scale: float = 0.5  # Standard deviation of mask ratio
+
+    def __post_init__(self):
+        allowed = {"mar", "ar"}
+        if len(self.generator_type_list) != 4:
+            raise ValueError("generator_type_list must contain exactly 4 entries for levels 0-3")
+        for idx, g in enumerate(self.generator_type_list):
+            if g not in allowed:
+                raise ValueError(f"generator_type_list[{idx}] must be one of {allowed}, got '{g}'")
+        if self.scan_order not in {'row_major', 'column_major'}:
+            raise ValueError(f"scan_order must be 'row_major' or 'column_major', got '{self.scan_order}'")
 
 
 @dataclass
 class FractalTrainerConfig:
     """Main trainer configuration."""
-    # Single model architecture: 128→16→4→1
-    
     # Training hyperparameters
-    max_epochs: int = 50
+    max_steps: int = 200000
     grad_clip: float = 3.0
+    accumulate_grad_batches: int = 1
+
+    # Trainer runtime options
+    precision: str = "32"
+    strategy: Optional[str] = None
+    log_every_n_steps: int = 50
+    val_check_interval_steps: int = 2000
+    checkpoint_every_n_steps: int = 2000
+    save_top_k: int = 3
     
     # Visualization
-    log_images_every_n_epochs: int = 1
+    log_images_every_n_steps: int = 5000
     num_images_to_log: int = 4
     
     # Sub-configs
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
     
     def __post_init__(self):
         """Validate configuration."""
+        assert self.max_steps > 0, "max_steps must be positive"
         assert self.grad_clip >= 0, "grad_clip must be non-negative"
+        assert self.accumulate_grad_batches >= 1, "accumulate_grad_batches must be >= 1"
+        assert self.precision in {"16", "32", "bf16"}, "precision must be one of {'16', '32', 'bf16'}"
+        if self.log_images_every_n_steps is not None:
+            assert self.log_images_every_n_steps >= 0, "log_images_every_n_steps must be >= 0"
 
 
 # ==============================================================================
@@ -74,15 +112,22 @@ class FractalMIDILightningModule(pl.LightningModule):
         
         # Build model
         self.model = self._build_model()
+        self._last_logged_image_step = -1
         
     def _build_model(self):
         """Build FractalGen model (128→16→4→1)."""
+        model_cfg = self.config.model
         model = fractalmar_piano(
-            attn_dropout=0.0,
-            proj_dropout=0.0,
-            guiding_pixel=False,
-            num_conds=5,
-            v_weight=1.0
+            attn_dropout=model_cfg.attn_dropout,
+            proj_dropout=model_cfg.proj_dropout,
+            guiding_pixel=model_cfg.guiding_pixel,
+            num_conds=model_cfg.num_conds,
+            v_weight=model_cfg.v_weight,
+            grad_checkpointing=model_cfg.grad_checkpointing,
+            generator_type_list=model_cfg.generator_type_list,
+            scan_order=model_cfg.scan_order,
+            mask_ratio_loc=model_cfg.mask_ratio_loc,
+            mask_ratio_scale=model_cfg.mask_ratio_scale
         )
         return model
     
@@ -102,19 +147,29 @@ class FractalMIDILightningModule(pl.LightningModule):
             piano_rolls = piano_rolls.unsqueeze(1)
         
         # FractalGen forward computes loss recursively through all levels
-        loss = self.model(piano_rolls)
+        loss, stats = self.model(piano_rolls)
         
-        return loss
+        return loss, stats
     
     def training_step(self, batch, batch_idx):
         """Training step."""
-        piano_rolls, durations = batch
+        pitch_shifts = None
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            piano_rolls, durations, pitch_shifts = batch
+        else:
+            piano_rolls, durations = batch
         
         # Forward pass (already computes loss)
-        loss = self(piano_rolls, durations)
+        loss, stats = self(piano_rolls, durations)
         
         # Log metrics
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_loss', loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+        self._log_metrics(stats, split='train', on_step=True, on_epoch=False)
+
+        # Pitch shift statistics (optional, only in TensorBoard)
+        if pitch_shifts is not None:
+            pitch_shifts = pitch_shifts.to(piano_rolls.device)
+            self.log('train/pitch_shift_mean', pitch_shifts.float().mean(), on_step=True, on_epoch=False, logger=True, prog_bar=False)
         
         # Log learning rate (only if trainer is attached)
         try:
@@ -127,152 +182,243 @@ class FractalMIDILightningModule(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         """Validation step."""
-        piano_rolls, durations = batch
+        pitch_shifts = None
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            piano_rolls, durations, pitch_shifts = batch
+        else:
+            piano_rolls, durations = batch
         
         # Forward pass
-        loss = self(piano_rolls, durations)
+        loss, stats = self(piano_rolls, durations)
         
         # Log metrics
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self._log_metrics(stats, split='val', on_step=False, on_epoch=True)
+
+        # Note: Validation typically doesn't use pitch shift augmentation
+        # (only training does), so this is usually not logged
         
-        # Log images periodically
-        if batch_idx == 0 and self.current_epoch % self.config.log_images_every_n_epochs == 0:
-            self._log_images(batch, batch_idx, 'val')
+        # Log images periodically (only on first batch to avoid redundancy)
+        if batch_idx == 0:
+            should_log_images = (
+                self.config.log_images_every_n_steps is not None
+                and self.config.log_images_every_n_steps > 0
+                and self.global_step > 0
+                and self.global_step % self.config.log_images_every_n_steps == 0
+            )
+            if should_log_images:
+                self._log_images(batch, batch_idx, 'val', force_sample=True)
         
         return loss
     
     def test_step(self, batch, batch_idx):
         """Test step."""
-        piano_rolls, durations = batch
+        pitch_shifts = None
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            piano_rolls, durations, pitch_shifts = batch
+        else:
+            piano_rolls, durations = batch
         
         # Forward pass
-        loss = self(piano_rolls, durations)
+        loss, stats = self(piano_rolls, durations)
         
         # Log metrics
         self.log('test_loss', loss, on_step=False, on_epoch=True, logger=True, sync_dist=True)
-        
+        self._log_metrics(stats, split='test', on_step=False, on_epoch=True)
+
         return loss
     
-    def _log_images(self, batch, batch_idx, split='train'):
-        """Log piano roll images to TensorBoard and save GIF."""
+    def _log_images(self, batch, batch_idx, split='train', force_sample=False):
+        """Log piano rolls and generated samples during validation."""
         if self.trainer is None or self.logger is None:
+            return
+        if self.trainer.sanity_checking:
             return
         
         # Only log during validation
         if split != 'val':
             return
         
-        # No need for persistent GIF frames list anymore
-        # Each epoch will create its own generation process GIF
-        
-        piano_rolls, durations = batch
+        if isinstance(batch, (list, tuple)):
+            piano_rolls = batch[0]
+        else:
+            piano_rolls = batch
         num_to_log = min(self.config.num_images_to_log, piano_rolls.size(0))
+        if num_to_log <= 0:
+            return
         
-        # Log ground truth only once at epoch 0 (not during sanity check)
-        if not hasattr(self, '_logged_gt'):
-            if self.current_epoch == 0 and not self.trainer.sanity_checking:
-                print(f"\n📸 Logging ground truth images (epoch {self.current_epoch})...")
-                for i in range(num_to_log):
-                    piano_roll = piano_rolls[i]
-                    if piano_roll.dim() == 3:
-                        piano_roll = piano_roll.squeeze(0)
-                    
-                    try:
-                        log_piano_roll_to_tensorboard(
-                            self.logger.experiment,
-                            f'val/ground_truth/sample_{i}',
-                            piano_roll,
-                            self.global_step,
-                            apply_colormap=True
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to log ground truth {i}: {e}")
-                self._logged_gt = True
-                print(f"✓ Ground truth logged!")
-            else:
-                return  # Skip if not epoch 0 and not logged yet
+        # Check if we should log this step
+        if not force_sample:
+            return
+        if self.config.log_images_every_n_steps is None or self.config.log_images_every_n_steps <= 0:
+            return
         
-        # Generate samples every epoch (only if ground truth already logged)
-        if not hasattr(self, '_logged_gt'):
-            return  # Wait until ground truth is logged
+        # Avoid logging images multiple times at the same step
+        if self._last_logged_image_step == self.global_step:
+            return
         
-        print(f"\n🎨 Generating samples with hierarchical visualization for epoch {self.current_epoch}...")
-        with torch.no_grad():
-            generated_samples = []
+        self._last_logged_image_step = self.global_step
+        
+        # Log ground truth (every time we log, not just once)
+        for i in range(num_to_log):
+            roll = piano_rolls[i]
+            if roll.dim() == 3:
+                roll = roll.squeeze(0)
+            try:
+                log_piano_roll_to_tensorboard(
+                    self.logger.experiment,
+                    f'{split}/ground_truth/step_{self.global_step:07d}_sample_{i}',
+                    roll.detach().cpu(),
+                    self.global_step,
+                    apply_colormap=True
+                )
+            except Exception as exc:
+                print(f"Warning: Failed to log ground truth {i}: {exc}")
+
+        # Generate and log samples with intermediates for GIF
+        samples_to_generate = num_to_log
+        try:
+            with torch.no_grad():
+                generated, intermediates = self.model.sample(
+                    batch_size=samples_to_generate,
+                    cond_list=None,
+                    num_iter_list=[8, 4, 2, 1],
+                    cfg=1.0,
+                    cfg_schedule="constant",
+                    temperature=1.0,
+                    filter_threshold=0,
+                    return_intermediates=True
+                )
+        except Exception as exc:
+            print(f"Warning: Failed to generate samples for logging: {exc}")
+            import traceback
+            traceback.print_exc()
+            return
+
+        if torch.is_tensor(generated) and generated.dim() == 4:
+            generated = generated.squeeze(1)
+
+        if not torch.is_tensor(generated):
+            return
+
+        generated = generated.detach().cpu()
+        if generated.dim() == 2:
+            generated = generated.unsqueeze(0)
+
+        # Log final generated samples
+        for i in range(min(samples_to_generate, generated.size(0))):
+            roll = generated[i]
+            if roll.dim() == 3:
+                roll = roll.squeeze(0)
+            try:
+                log_piano_roll_to_tensorboard(
+                    self.logger.experiment,
+                    f'{split}/generated/step_{self.global_step:07d}_sample_{i}',
+                    roll,
+                    self.global_step,
+                    apply_colormap=True
+                )
+            except Exception as exc:
+                print(f"Warning: Failed to log generated sample {i}: {exc}")
+        
+        # Create and log GIFs from intermediates
+        if intermediates is not None and len(intermediates) > 0:
+            self._create_generation_gifs(intermediates, samples_to_generate, split)
+
+    def _create_generation_gifs(self, intermediates, num_samples, split='val'):
+        """Create GIF animations from generation intermediates."""
+        try:
+            import numpy as np
+            from PIL import Image
+            import io
             
-            for i in range(min(1, num_to_log)):
+            # intermediates is a list of tensors, each representing a generation step
+            # Each tensor has shape (batch_size, 1, H, W) or (batch_size, H, W)
+            
+            for sample_idx in range(num_samples):
+                frames = []
+                
+                for step_idx, intermediate in enumerate(intermediates):
+                    # Extract single sample
+                    if torch.is_tensor(intermediate):
+                        intermediate = intermediate.detach().cpu()
+                        if intermediate.dim() == 4:
+                            frame = intermediate[sample_idx].squeeze(0)  # (H, W)
+                        elif intermediate.dim() == 3:
+                            frame = intermediate[sample_idx]  # (H, W)
+                        else:
+                            continue
+                    else:
+                        continue
+                    
+                    # Convert to numpy
+                    frame_np = frame.numpy()
+                    
+                    # Normalize from [-1, 1] to [0, 255]
+                    # -1 (white/silence) -> 0, 1 (loud/black) -> 255
+                    frame_np = ((frame_np + 1.0) / 2.0 * 255)
+                    frame_np = np.clip(frame_np, 0, 255).astype(np.uint8)
+                    
+                    # Apply colormap (viridis)
+                    # Create RGB image
+                    from matplotlib import cm
+                    colormap = cm.get_cmap('viridis')
+                    frame_colored = colormap(frame_np / 255.0)
+                    frame_rgb = (frame_colored[:, :, :3] * 255).astype(np.uint8)
+                    
+                    # Convert to PIL Image
+                    pil_img = Image.fromarray(frame_rgb)
+                    
+                    # Resize for better viewing (optional)
+                    # pil_img = pil_img.resize((pil_img.width * 2, pil_img.height * 2), Image.NEAREST)
+                    
+                    frames.append(pil_img)
+                
+                if len(frames) == 0:
+                    continue
+                
+                # Save GIF to memory buffer
+                buf = io.BytesIO()
+                frames[0].save(
+                    buf,
+                    format='GIF',
+                    append_images=frames[1:],
+                    save_all=True,
+                    duration=200,  # milliseconds per frame
+                    loop=0  # infinite loop
+                )
+                buf.seek(0)
+                
+                # Save GIF to disk for viewing
                 try:
-                    # Use different random seed for each epoch
-                    torch.manual_seed(self.current_epoch * 1000 + i)
+                    gif_data = buf.getvalue()
                     
-                    # Vary temperature slightly based on epoch for diversity
-                    temperature = 1.0 + (self.current_epoch % 5) * 0.1
+                    # Save to disk (TensorBoard doesn't directly support GIF animation viewing)
+                    import os
+                    gif_dir = os.path.join(self.logger.log_dir, 'generation_gifs')
+                    os.makedirs(gif_dir, exist_ok=True)
+                    gif_path = os.path.join(gif_dir, f'step_{self.global_step:07d}_sample_{sample_idx}.gif')
                     
-                    # Generate sample with intermediate outputs
-                    result = self.model.sample(
-                        batch_size=1,
-                        cond_list=None,
-                        num_iter_list=[8, 4, 2, 1],
-                        cfg=1.0,
-                        temperature=temperature,
-                        return_intermediates=True
+                    with open(gif_path, 'wb') as f:
+                        f.write(gif_data)
+                    
+                    print(f"Saved generation GIF: {gif_path}")
+                    
+                    # Also log the final frame to TensorBoard as a preview
+                    self.logger.experiment.add_image(
+                        f'{split}/generation_preview/step_{self.global_step:07d}_sample_{sample_idx}',
+                        np.array(frames[-1]).transpose(2, 0, 1),  # Last frame as thumbnail
+                        self.global_step,
+                        dataformats='CHW'
                     )
                     
-                    if isinstance(result, tuple):
-                        gen, intermediates = result
-                        print(f"  ✓ Generated with {len(intermediates)} hierarchical levels")
-                        
-                        # Create GIF from hierarchical outputs
-                        gif_frames = self._create_hierarchical_gif(intermediates, temperature)
-                        if gif_frames:
-                            gif_path = f"{self.trainer.log_dir}/generation_epoch_{self.current_epoch:03d}.gif"
-                            
-                            duration_per_frame = 10  
-                            actual_total_sec = len(gif_frames) * duration_per_frame / 1000
-                            
-                            gif_frames[0].save(
-                                gif_path,
-                                save_all=True,
-                                append_images=gif_frames[1:],
-                                duration=duration_per_frame,
-                                loop=0,
-                                optimize=False 
-                            )
-                            print(f"  🎬 GIF saved: {gif_path} ({len(gif_frames)} frames, {duration_per_frame}ms/frame = {actual_total_sec:.1f}s total)")
-                    else:
-                        gen = result
-                        print(f"  ✓ Generated sample {i} (shape: {gen.shape}, temp={temperature:.2f})")
-                    
-                    generated_samples.append(gen.squeeze(1) if gen.dim() == 4 else gen)
-                    
                 except Exception as e:
-                    print(f"  ✗ Failed to generate sample {i}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-            
-            # Log generated images to TensorBoard
-            if generated_samples:
-                print(f"  📊 Logging to TensorBoard...")
-                for i, gen_roll in enumerate(generated_samples):
-                    if gen_roll.dim() == 3:
-                        gen_roll = gen_roll.squeeze(0)
-                    
-                    try:
-                        log_piano_roll_to_tensorboard(
-                            self.logger.experiment,
-                            f'val/generated/epoch_{self.current_epoch:03d}_sample_{i}',
-                            gen_roll,
-                            self.global_step,
-                            apply_colormap=True
-                        )
-                        print(f"    ✓ Logged sample {i}")
-                    except Exception as e:
-                        print(f"    ✗ Failed to log generated {i}: {e}")
+                    print(f"Warning: Failed to log GIF for sample {sample_idx}: {e}")
                 
-            else:
-                print(f"  ⚠️  No samples generated")
-
+        except Exception as exc:
+            print(f"Warning: Failed to create generation GIFs: {exc}")
+            import traceback
+            traceback.print_exc()
 
     def configure_optimizers(self):
         """Configure optimizer and learning rate scheduler."""
@@ -288,31 +434,26 @@ class FractalMIDILightningModule(pl.LightningModule):
         )
         
         # Create learning rate scheduler
+        total_steps = max(1, self.config.max_steps)
+        warmup_steps = max(0, sched_cfg.warmup_steps)
+
         def lr_lambda(current_step: int):
-            """Learning rate schedule function."""
-            try:
-                total_steps = self.trainer.estimated_stepping_batches
-                current_epoch = current_step / max(1, total_steps) * self.config.max_epochs
-            except (AttributeError, RuntimeError):
-                # For testing without trainer
-                current_epoch = current_step / 1000.0
-            
-            # Warmup
-            if current_epoch < sched_cfg.warmup_epochs:
-                return current_epoch / sched_cfg.warmup_epochs
-            
-            # After warmup
-            progress = (current_epoch - sched_cfg.warmup_epochs) / (self.config.max_epochs - sched_cfg.warmup_epochs)
+            """Learning rate schedule function based on global step."""
+            step = max(current_step, 0)
+
+            if warmup_steps > 0 and step < warmup_steps:
+                return float(step + 1) / float(warmup_steps)
+
+            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
             progress = min(1.0, max(0.0, progress))
             
             if sched_cfg.schedule_type == "constant":
                 return 1.0
-            elif sched_cfg.schedule_type == "linear":
+            if sched_cfg.schedule_type == "linear":
                 return 1.0 - progress * (1.0 - sched_cfg.min_lr / opt_cfg.lr)
-            elif sched_cfg.schedule_type == "cosine":
+            if sched_cfg.schedule_type == "cosine":
                 cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
                 return sched_cfg.min_lr / opt_cfg.lr + (1.0 - sched_cfg.min_lr / opt_cfg.lr) * cosine_decay
-            else:
                 return 1.0
         
         scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
@@ -325,6 +466,27 @@ class FractalMIDILightningModule(pl.LightningModule):
                 "frequency": 1,
             },
         }
+
+    def _log_metrics(self, stats: Dict[str, torch.Tensor], split: str, on_step: bool, on_epoch: bool):
+        """Helper to log hierarchical statistics returned by the model."""
+        if stats is None:
+            return
+
+        for key, value in stats.items():
+            metric_name = f"{split}/{key}"
+            if isinstance(value, (int, float)):
+                tensor_value = torch.tensor(float(value), device=self.device)
+            elif torch.is_tensor(value):
+                tensor_value = value.detach()
+                if tensor_value.numel() != 1:
+                    tensor_value = tensor_value.mean()
+                tensor_value = tensor_value.to(self.device)
+            else:
+                continue
+
+            tensor_value = tensor_value.float()
+            sync_dist = split != 'train'
+            self.log(metric_name, tensor_value, on_step=on_step, on_epoch=on_epoch, prog_bar=False, logger=True, sync_dist=sync_dist)
     
     def on_before_optimizer_step(self, optimizer):
         """Gradient clipping before optimizer step."""
@@ -491,7 +653,8 @@ class FractalMIDILightningModule(pl.LightningModule):
 # Helper Functions
 # ==============================================================================
 
-def create_trainer(config: FractalTrainerConfig, **trainer_kwargs) -> pl.Trainer:
+def create_trainer(config: FractalTrainerConfig, *, val_check_interval: float | None = None,
+                  check_val_every_n_epoch: int | None = None, **trainer_kwargs) -> pl.Trainer:
     """
     Create PyTorch Lightning trainer.
     
@@ -503,23 +666,32 @@ def create_trainer(config: FractalTrainerConfig, **trainer_kwargs) -> pl.Trainer
         PyTorch Lightning Trainer
     """
     # Default trainer arguments
+    strategy = config.strategy if config.strategy is not None else ('ddp' if torch.cuda.device_count() > 1 else 'auto')
+
     default_args = {
-        'max_epochs': config.max_epochs,
+        'max_steps': config.max_steps,
+        'max_epochs': 1_000_000,  # Effectively rely on max_steps for termination
         'accelerator': 'auto',
         'devices': 'auto',
-        'strategy': 'ddp' if torch.cuda.device_count() > 1 else 'auto',
-        'precision': '32',  # Use FP32 for stability
+        'strategy': strategy,
+        'precision': config.precision,
         'gradient_clip_val': 0,  # Handled in on_before_optimizer_step
-        'accumulate_grad_batches': 8,
-        'log_every_n_steps': 50,
-        'val_check_interval': 1.0,
-        'check_val_every_n_epoch': 1,
+        'accumulate_grad_batches': config.accumulate_grad_batches,
+        'log_every_n_steps': config.log_every_n_steps,
         'enable_checkpointing': True,
         'enable_progress_bar': True,
         'enable_model_summary': True,
         'deterministic': False,
         'benchmark': True,
+        'num_sanity_val_steps': 0,
     }
+
+    if val_check_interval is None:
+        default_args['val_check_interval'] = min(1.0, max(0.0, config.val_check_interval_steps / max(1, config.max_steps)))
+    else:
+        default_args['val_check_interval'] = val_check_interval
+
+    default_args['check_val_every_n_epoch'] = check_val_every_n_epoch if check_val_every_n_epoch is not None else 1
     
     # Merge with user-provided arguments
     trainer_args = {**default_args, **trainer_kwargs}

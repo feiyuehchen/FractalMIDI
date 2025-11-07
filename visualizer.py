@@ -49,7 +49,8 @@ def piano_roll_to_image(piano_roll: Union[torch.Tensor, np.ndarray],
     
     Args:
         piano_roll: Piano roll matrix of shape (128, T) or (batch, 128, T)
-                   Values should be in range [0, 1] representing normalized velocity
+                   Values should be in range [-1, 1] or [0, 1] representing normalized velocity
+                   -1 or 0 = silence (white), 1 = loud (colored)
         apply_colormap: If True, apply velocity colormap. If False, return grayscale
         min_height: Minimum height for the output image (will upscale if needed)
         return_pil: If True, return PIL Image. If False, return torch.Tensor
@@ -70,6 +71,14 @@ def piano_roll_to_image(piano_roll: Union[torch.Tensor, np.ndarray],
         piano_roll_np = piano_roll_np[np.newaxis, ...]  # Add batch dimension
     
     batch_size, height, width = piano_roll_np.shape
+    
+    # Normalize to [0, 1] range if input is in [-1, 1]
+    # Check if values are in [-1, 1] range
+    if piano_roll_np.min() < -0.5:  # Likely in [-1, 1] range
+        # Convert from [-1, 1] to [0, 1]
+        # -1 (silence/white) -> 0, 1 (loud) -> 1
+        piano_roll_np = (piano_roll_np + 1.0) / 2.0
+        piano_roll_np = np.clip(piano_roll_np, 0, 1)
     
     # Apply colormap to create RGB images
     if apply_colormap:
@@ -124,6 +133,7 @@ def visualize_piano_roll(piano_roll: Union[torch.Tensor, np.ndarray],
     
     Args:
         piano_roll: Piano roll matrix of shape (128, T)
+                   Values in range [-1, 1] or [0, 1]
         save_path: Path to save the visualization. If None, returns PIL Image
         title: Title for the plot
         figsize: Figure size in inches
@@ -136,6 +146,11 @@ def visualize_piano_roll(piano_roll: Union[torch.Tensor, np.ndarray],
         piano_roll_np = piano_roll.detach().cpu().numpy()
     else:
         piano_roll_np = piano_roll
+    
+    # Normalize to [0, 1] if in [-1, 1] range
+    if piano_roll_np.min() < -0.5:
+        piano_roll_np = (piano_roll_np + 1.0) / 2.0
+        piano_roll_np = np.clip(piano_roll_np, 0, 1)
     
     # Create figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -242,8 +257,8 @@ def compare_piano_rolls(original: Union[torch.Tensor, np.ndarray],
     Compare original and generated piano rolls side by side.
     
     Args:
-        original: Original piano roll (128, T)
-        generated: Generated piano roll (128, T)
+        original: Original piano roll (128, T), values in [-1, 1] or [0, 1]
+        generated: Generated piano roll (128, T), values in [-1, 1] or [0, 1]
         save_path: Path to save the comparison
         figsize: Figure size
         dpi: DPI for saved image
@@ -255,6 +270,14 @@ def compare_piano_rolls(original: Union[torch.Tensor, np.ndarray],
         original = original.detach().cpu().numpy()
     if isinstance(generated, torch.Tensor):
         generated = generated.detach().cpu().numpy()
+    
+    # Normalize to [0, 1] if in [-1, 1] range
+    if original.min() < -0.5:
+        original = (original + 1.0) / 2.0
+        original = np.clip(original, 0, 1)
+    if generated.min() < -0.5:
+        generated = (generated + 1.0) / 2.0
+        generated = np.clip(generated, 0, 1)
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, dpi=dpi)
     

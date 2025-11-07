@@ -6,15 +6,26 @@
 
 ```
 FractalMIDI/
-├── model.py                    # FractalGen 模型實現（3層遞歸架構）
+├── model.py                    # 模型接口（向後兼容）
+├── models/                     # 模組化模型組件
+│   ├── attention.py            # 注意力機制
+│   ├── blocks.py               # Transformer 區塊
+│   ├── mar_generator.py        # MAR 生成器
+│   ├── ar_generator.py         # AR 生成器
+│   ├── velocity_loss.py        # 力度預測層
+│   ├── fractal_gen.py          # 主要 FractalGen 模型
+│   ├── generation.py           # 生成函數
+│   └── utils.py                # 工具函數
 ├── trainer.py                  # PyTorch Lightning 訓練器
 ├── dataset.py                  # MIDI 數據加載與預處理
 ├── visualizer.py               # Piano roll 可視化工具
-├── main_fractalgen.py          # 訓練主程序（推薦使用）
-├── inference_fractalgen.py     # 推理程序（推薦使用）
-├── main.py                     # 原訓練程序（保留）
-└── inference.py                # 原推理程序（保留）
+├── main.py                     # 訓練主程序
+├── inference.py                # 推理程序
+├── run_training.sh             # 訓練腳本
+└── run_inference.sh            # 推理腳本
 ```
+
+**模組化結構**：模型代碼已重構為模組化結構，提升可讀性和可維護性。詳見 [docs/MODEL_STRUCTURE.md](docs/MODEL_STRUCTURE.md)。
 
 ## ⚡ 快速開始
 
@@ -40,33 +51,50 @@ find /path/to/validation/files -name "*.mid" > dataset/valid.txt
 ### 3. 開始訓練
 
 ```bash
-# Small model (30M 參數，推薦用於快速實驗)
-python main_fractalgen.py \
-    --model_size small \
-    --batch_size 8 \
-    --max_epochs 50 \
-    --devices 0,1
+# 使用訓練腳本（推薦）
+bash run_training.sh
 
-# Base model (56M 參數，推薦用於正式訓練)
-python main_fractalgen.py \
-    --model_size base \
-    --batch_size 4 \
-    --max_epochs 100 \
-    --devices 0,1
-
-# Large model (90M 參數，最佳質量)
-python main_fractalgen.py \
-    --model_size large \
-    --batch_size 2 \
-    --max_epochs 100 \
-    --devices 0,1
+# 或直接使用 Python
+python main.py \
+    --train_batch_size 8 \
+    --val_batch_size 8 \
+    --max_steps 200000 \
+    --val_check_interval_steps 2000 \
+    --checkpoint_every_n_steps 2000 \
+    --devices 0,1 \
+    --generator_types "ar,ar,ar,ar" \
+    --scan_order "row_major"
 ```
+
+**配置選項：**
+- `--generator_types`: 每層的生成器類型，可選 `mar` 或 `ar`（例如：`"ar,ar,ar,ar"` 或 `"mar,mar,mar,mar"`）
+- `--scan_order`: AR 生成器的掃描順序
+  - `row_major`（預設）：先左到右，再上到下（強調時間連續性）
+  - `column_major`：先上到下，再左到右（強調和聲結構）
 
 ### 4. 監控訓練
 
 ```bash
 tensorboard --logdir outputs/fractalgen
 ```
+
+**TensorBoard 中的可視化：**
+- `train/loss`, `val_loss`: 訓練和驗證損失
+- `val/ground_truth/`: 驗證集的真實 piano rolls
+- `val/generated/`: 模型生成的 piano rolls
+- `val/generation_preview/`: GIF 動畫的最後一幀預覽
+
+**Generation GIF 動畫：**
+在每個 `log_images_every_n_steps` 時，模型會生成帶有中間步驟的動畫 GIF，展示生成過程：
+```bash
+# GIF 儲存位置
+outputs/fractalgen_ar_ar_ar_ar/lightning_logs/version_X/generation_gifs/
+├── step_0010000_sample_0.gif
+├── step_0010000_sample_1.gif
+├── step_0010000_sample_2.gif
+└── step_0010000_sample_3.gif
+```
+每個 GIF 展示模型如何從粗略到精細逐步生成 piano roll，幫助理解階層式生成過程。
 
 ### 5. 生成 MIDI
 
@@ -120,26 +148,28 @@ Level 2 (1 patch): PianoRollVelocityLoss
 
 ### 模型規模
 
-| Model | Parameters | Embed Dims | Blocks | Heads | Memory | Speed |
-|-------|-----------|------------|--------|-------|--------|-------|
-| Small | 30M | 768/384/192 | 16/4/2 | 12/6/3 | ~8GB | 最快 |
-| Base | 56M | 1024/512/256 | 24/6/3 | 16/8/4 | ~12GB | 中等 |
-| Large | 90M | 1280/640/320 | 32/8/4 | 20/10/5 | ~18GB | 較慢 |
+目前版本僅提供單一配置（約 30M 參數），對應 `768/384/192` 的層級嵌入維度與 `16/4/2/1` 的 Transformer block 數量，可在 8GB GPU 上以 `batch_size=8` 順利訓練。
 
 ## 🎛️ 重要參數
 
 ### 訓練參數
 
 ```python
---model_size small/base/large  # 模型規模
---batch_size 8                 # 批次大小（根據 GPU 記憶體調整）
---max_epochs 50                # 訓練輪數
---lr 1e-4                      # 學習率
---weight_decay 0.05            # 權重衰減
---warmup_epochs 5              # Warmup 輪數
---grad_clip 3.0                # 梯度裁剪
---devices 0,1                  # 使用的 GPU
---precision 32                 # 精度 (32/16/bf16)
+--train_batch_size 8              # 訓練批次大小（單 GPU）
+--val_batch_size 8                # 驗證批次大小
+--max_steps 200000               # 總訓練步數
+--val_check_interval_steps 2000  # 每隔多少步驗證一次
+--checkpoint_every_n_steps 2000  # 每隔多少步儲存模型
+--lr 1e-4                        # 學習率
+--weight_decay 0.05              # 權重衰減
+--warmup_steps 2000              # Warmup 步數
+--accumulate_grad_batches 1      # 梯度累積步數
+--grad_clip 3.0                  # 梯度裁剪
+--devices 0,1                    # 使用的 GPU
+--precision 32                   # 精度 (32/16/bf16)
+--log_images_every_n_steps 5000  # 生成樣本頻率（0 關閉）
+--cache_dir ./cache              # （選）piano roll 快取目錄
+--no_cache_in_memory             # （選）停用記憶體快取
 ```
 
 ### 生成參數
@@ -189,19 +219,33 @@ class MARConfig:
     patch_size: int = 4
     # ...
 
+# dataset.py
+@dataclass
+class MIDIDatasetConfig:
+    augment_factor: int = 1
+    cache_in_memory: bool = True
+    cache_dir: str | None = None
+    pitch_shift_range: tuple[int, int] = (-3, 3)
+    generator_type_list: tuple[str, str, str, str] = ("mar", "mar", "mar", "mar")
+    # ...
+
 # trainer.py
 @dataclass
 class FractalTrainerConfig:
-    model_size: str = 'small'
-    max_epochs: int = 50
+    max_steps: int = 200000
     grad_clip: float = 3.0
+    accumulate_grad_batches: int = 1
+    val_check_interval_steps: int = 2000
+    checkpoint_every_n_steps: int = 2000
     # ...
 
 # dataset.py
 @dataclass
 class DataLoaderConfig:
-    batch_size: int = 8
-    shuffle: bool = True
+    num_workers: int = 4
+    pin_memory: bool = True
+    prefetch_factor: int = 2
+    persistent_workers: bool = True
     patch_size: int = 4
     # ...
 ```
@@ -236,30 +280,24 @@ for level in [0, 1, 2]:
 
 ## 🔬 實驗設置
 
-### 推薦設置（Small Model）
+### 推薦設置
 
 ```bash
 python main_fractalgen.py \
-    --model_size small \
-    --batch_size 8 \
-    --max_epochs 50 \
+    --train_batch_size 8 \
+    --val_batch_size 8 \
+    --augment_factor 2 \
+    --pitch_shift_min -3 \
+    --pitch_shift_max 3 \
+    --generator_types mar,mar,mar,mar \
+    --max_steps 240000 \
+    --val_check_interval_steps 2000 \
+    --checkpoint_every_n_steps 2000 \
     --lr 1e-4 \
-    --warmup_epochs 5 \
+    --warmup_steps 4000 \
     --devices 0,1 \
-    --precision 32
-```
-
-### 推薦設置（Base Model）
-
-```bash
-python main_fractalgen.py \
-    --model_size base \
-    --batch_size 4 \
-    --max_epochs 100 \
-    --lr 8e-5 \
-    --warmup_epochs 10 \
-    --devices 0,1 \
-    --precision 32
+    --precision 32 \
+    --log_images_every_n_steps 0
 ```
 
 ### 預期 Loss
@@ -283,9 +321,7 @@ python main_fractalgen.py \
 
 ### 3. 記憶體使用
 
-- **Small**: ~8GB (batch_size=8)
-- **Base**: ~12GB (batch_size=4)
-- **Large**: ~18GB (batch_size=2)
+- 約 8GB (batch_size=8)
 
 ## 📚 參考文件
 
@@ -303,28 +339,33 @@ python main_fractalgen.py \
 ```bash
 # 檢查數據
 python -c "
-from dataset import create_dataloader
-loader = create_dataloader('dataset/train.txt', batch_size=4)
+from dataset import create_dataloader, DataLoaderConfig
+cfg = DataLoaderConfig.training_default('dataset/train.txt')
+cfg.sampler.batch_size = 4
+cfg.num_workers = 0
+loader = create_dataloader(config=cfg)
 batch = next(iter(loader))
 print(f'Batch shape: {batch[0].shape}')
 print(f'Value range: [{batch[0].min():.3f}, {batch[0].max():.3f}]')
+if len(batch) > 2:
+    print(f'Pitch shifts: {batch[2].tolist()}')
 "
 
 # 降低學習率
 python main_fractalgen.py --lr 5e-5
 
 # 增加 warmup
-python main_fractalgen.py --warmup_epochs 10
+python main_fractalgen.py --warmup_steps 4000
 ```
 
 ### 記憶體不足
 
 ```bash
 # 減小批次大小
-python main_fractalgen.py --batch_size 2
+python main_fractalgen.py --train_batch_size 2
 
-# 使用小模型
-python main_fractalgen.py --model_size small
+# 啟用梯度檢查點（略降速度換取記憶體）
+python main_fractalgen.py --grad_checkpoint
 
 # 使用混合精度（謹慎）
 python main_fractalgen.py --precision bf16
@@ -360,9 +401,8 @@ python inference_fractalgen.py --temperature 0.8
 
 ### 2. 訓練策略
 
-- 從 small model 開始驗證流程
-- 使用 base model 進行正式訓練
-- 監控 TensorBoard 的重建圖像質量
+- 目前僅提供單一模型配置，建議先以短訓練驗證流程
+- 監控 TensorBoard 的重建圖像質量與階層式指標
 
 ### 3. 生成策略
 
@@ -413,8 +453,7 @@ num_iter_list = [16, 8, 1]  # 最慢
 
 ### 提升質量
 
-- 增加模型大小: `--model_size large`
-- 延長訓練: `--max_epochs 200`
+- 延長訓練: `--max_steps 400000`
 - 數據增強（已內建隨機裁剪）
 - 調整採樣參數
 
@@ -426,8 +465,8 @@ python main_fractalgen.py --fast_dev_run
 
 # 檢查模型
 python -c "
-from model import fractalmar_piano_small
-model = fractalmar_piano_small()
+from model import fractalmar_piano
+model = fractalmar_piano()
 print(f'Parameters: {sum(p.numel() for p in model.parameters())/1e6:.1f}M')
 "
 
@@ -445,7 +484,7 @@ for i, batch in enumerate(loader):
 
 ### 短期（1-2週）
 
-1. ✅ 開始訓練 small/base model
+1. ✅ 完成模型訓練流程驗證
 2. ✅ 監控 loss 和重建圖像
 3. ⚠️  調試生成函數維度問題
 

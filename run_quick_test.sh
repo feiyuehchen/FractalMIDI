@@ -17,9 +17,11 @@ echo ""
 export CUDA_VISIBLE_DEVICES=0,1
 
 # Quick test configuration
-BATCH_SIZE=4  # Smaller batch for faster testing
-MAX_EPOCHS=5  # Just 5 epochs for quick validation
+TRAIN_BATCH_SIZE=4  # Smaller batch for faster testing
+VAL_BATCH_SIZE=4
+MAX_STEPS=2000  # Short run for validation
 LEARNING_RATE=1e-4
+WARMUP_STEPS=200
 
 # Data paths
 TRAIN_DATA="dataset/train.txt"
@@ -30,8 +32,9 @@ OUTPUT_DIR="outputs/fractalgen_test"
 
 echo "Quick Test Configuration:"
 echo "  Model: FractalGen (128→16→4→1, ~30M params)"
-echo "  Batch size: $BATCH_SIZE"
-echo "  Epochs: $MAX_EPOCHS"
+echo "  Train batch size: $TRAIN_BATCH_SIZE"
+echo "  Val batch size: $VAL_BATCH_SIZE"
+echo "  Max steps: $MAX_STEPS"
 echo "  GPUs: $CUDA_VISIBLE_DEVICES"
 echo "  Output: $OUTPUT_DIR"
 echo ""
@@ -47,16 +50,21 @@ echo ""
 python main.py \
     --train_data "$TRAIN_DATA" \
     --val_data "$VAL_DATA" \
-    --batch_size "$BATCH_SIZE" \
-    --max_epochs "$MAX_EPOCHS" \
+    --train_batch_size "$TRAIN_BATCH_SIZE" \
+    --val_batch_size "$VAL_BATCH_SIZE" \
+    --max_steps "$MAX_STEPS" \
+    --val_check_interval_steps 200 \
+    --checkpoint_every_n_steps 400 \
+    --save_top_k -1 \
     --lr "$LEARNING_RATE" \
-    --warmup_epochs 2 \
+    --warmup_steps "$WARMUP_STEPS" \
     --devices 0,1 \
     --num_workers 2 \
+    --prefetch_factor 2 \
     --precision 32 \
-    --output_dir "$OUTPUT_DIR" \
     --log_every_n_steps 10 \
-    --save_top_k 1
+    --log_images_every_n_steps 0 \
+    --output_dir "$OUTPUT_DIR"
 
 echo ""
 echo "========================================================================"

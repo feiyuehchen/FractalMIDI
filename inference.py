@@ -193,8 +193,10 @@ def parse_args():
                        help='Classifier-free guidance strength')
     parser.add_argument('--temperature', type=float, default=1.0,
                        help='Sampling temperature')
-    parser.add_argument('--sparsity_bias', type=float, default=2.0,
-                       help='Bias to encourage sparsity (higher = sparser)')
+    parser.add_argument('--sparsity_bias', type=float, default=0.0,
+                       help='Bias to encourage sparsity (higher = sparser, 0 = no bias)')
+    parser.add_argument('--velocity_threshold', type=float, default=0.10,
+                       help='Minimum velocity to create a note (0-1)')
     
     # Output
     parser.add_argument('--output_dir', type=str, default='outputs/inference',
@@ -267,8 +269,16 @@ def main():
                     fractal_level=0
                 )
             
-            # Apply sparsity bias
-            generated = torch.sigmoid(generated - args.sparsity_bias)
+            # Extract tensor
+            if isinstance(generated, tuple):
+                generated = generated[0]  # Remove intermediates if present
+            
+            # Apply sparsity bias if specified (default is 0 = no bias, same as training)
+            if args.sparsity_bias != 0.0:
+                generated = generated - args.sparsity_bias
+                if args.sparsity_bias < 1.0:
+                    generated = generated / (1.0 - args.sparsity_bias)
+                generated = torch.clamp(generated, min=0.0, max=1.0)
             
             # Convert to piano roll
             piano_roll = generated[0, 0].cpu().numpy()  # (128, T)
@@ -278,21 +288,20 @@ def main():
             
             # Save MIDI
             midi_path = output_dir / f'unconditional_{i:03d}.mid'
-            score = piano_roll_to_midi(piano_roll)
+            score = piano_roll_to_midi(piano_roll, velocity_threshold=args.velocity_threshold)
             score.dump_midi(str(midi_path))
             print(f"✓ Saved MIDI: {midi_path}")
             
-            # Save image if requested
-            if args.save_images:
-                img_path = output_dir / f'unconditional_{i:03d}.png'
-                img_tensor = piano_roll_to_image(piano_roll)
-                # Convert tensor to PIL Image if needed
-                if torch.is_tensor(img_tensor):
-                    from torchvision.utils import save_image
-                    save_image(img_tensor, str(img_path))
-                else:
-                    img_tensor.save(str(img_path))
-                print(f"✓ Saved image: {img_path}")
+            # Always save image (like training does)
+            img_path = output_dir / f'unconditional_{i:03d}.png'
+            # Use the same visualization as training
+            img_pil = piano_roll_to_image(
+                torch.from_numpy(piano_roll),
+                apply_colormap=True,
+                return_pil=True
+            )
+            img_pil.save(str(img_path))
+            print(f"✓ Saved image: {img_path}")
     
     elif args.mode == 'conditional':
         # Conditional generation (prefix-based)
@@ -321,28 +330,34 @@ def main():
                 0.0
             )
         
-        # Apply sparsity bias
-        generated = torch.sigmoid(generated - args.sparsity_bias)
+        # Extract tensor
+        if isinstance(generated, tuple):
+            generated = generated[0]
+        
+        # Apply sparsity bias if specified (default is 0 = no bias, same as training)
+        if args.sparsity_bias != 0.0:
+            generated = generated - args.sparsity_bias
+            if args.sparsity_bias < 1.0:
+                generated = generated / (1.0 - args.sparsity_bias)
+            generated = torch.clamp(generated, min=0.0, max=1.0)
         
         piano_roll = generated[0, 0].cpu().numpy()
         
         # Save MIDI
         midi_path = output_dir / 'conditional_output.mid'
-        score = piano_roll_to_midi(piano_roll)
+        score = piano_roll_to_midi(piano_roll, velocity_threshold=args.velocity_threshold)
         score.dump_midi(str(midi_path))
         print(f"✓ Saved MIDI: {midi_path}")
         
-        # Save image
-        if args.save_images:
-            img_path = output_dir / 'conditional_output.png'
-            img_tensor = piano_roll_to_image(piano_roll)
-            # Convert tensor to PIL Image if needed
-            if torch.is_tensor(img_tensor):
-                from torchvision.utils import save_image
-                save_image(img_tensor, str(img_path))
-            else:
-                img_tensor.save(str(img_path))
-            print(f"✓ Saved image: {img_path}")
+        # Always save image
+        img_path = output_dir / 'conditional_output.png'
+        img_pil = piano_roll_to_image(
+            torch.from_numpy(piano_roll),
+            apply_colormap=True,
+            return_pil=True
+        )
+        img_pil.save(str(img_path))
+        print(f"✓ Saved image: {img_path}")
     
     elif args.mode == 'inpainting':
         # Inpainting
@@ -369,28 +384,34 @@ def main():
                 0.0
             )
         
-        # Apply sparsity bias
-        generated = torch.sigmoid(generated - args.sparsity_bias)
+        # Extract tensor
+        if isinstance(generated, tuple):
+            generated = generated[0]
+        
+        # Apply sparsity bias if specified (default is 0 = no bias, same as training)
+        if args.sparsity_bias != 0.0:
+            generated = generated - args.sparsity_bias
+            if args.sparsity_bias < 1.0:
+                generated = generated / (1.0 - args.sparsity_bias)
+            generated = torch.clamp(generated, min=0.0, max=1.0)
         
         piano_roll = generated[0, 0].cpu().numpy()
         
         # Save MIDI
         midi_path = output_dir / 'inpainting_output.mid'
-        score = piano_roll_to_midi(piano_roll)
+        score = piano_roll_to_midi(piano_roll, velocity_threshold=args.velocity_threshold)
         score.dump_midi(str(midi_path))
         print(f"✓ Saved MIDI: {midi_path}")
         
-        # Save image
-        if args.save_images:
-            img_path = output_dir / 'inpainting_output.png'
-            img_tensor = piano_roll_to_image(piano_roll)
-            # Convert tensor to PIL Image if needed
-            if torch.is_tensor(img_tensor):
-                from torchvision.utils import save_image
-                save_image(img_tensor, str(img_path))
-            else:
-                img_tensor.save(str(img_path))
-            print(f"✓ Saved image: {img_path}")
+        # Always save image
+        img_path = output_dir / 'inpainting_output.png'
+        img_pil = piano_roll_to_image(
+            torch.from_numpy(piano_roll),
+            apply_colormap=True,
+            return_pil=True
+        )
+        img_pil.save(str(img_path))
+        print(f"✓ Saved image: {img_path}")
     
     print(f"\n{'='*70}")
     print("Generation complete!")
