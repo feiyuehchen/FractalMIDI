@@ -8,3 +8,5 @@ torchvision
 scipy
 timm
 tensorboard
+pyyaml
+imageio  # For GIF generation

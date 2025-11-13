@@ -46,7 +46,7 @@ class Block(nn.Module):
 
 class CausalBlock(nn.Module):
     """
-    Transformer block with causal attention.
+    Transformer block with causal attention and KV Cache support.
     
     Args:
         dim: Input dimension
@@ -72,8 +72,16 @@ class CausalBlock(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=proj_drop)
 
-    def forward(self, x):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
+    def forward(self, x, use_cache=False, cache_position=None):
+        """
+        Forward pass with optional KV caching.
+        
+        Args:
+            x: Input tensor
+            use_cache: If True, use KV cache in attention
+            cache_position: Position in cache to update
+        """
+        x = x + self.drop_path(self.attn(self.norm1(x), use_cache=use_cache, cache_position=cache_position))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 

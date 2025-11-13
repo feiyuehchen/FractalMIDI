@@ -6,7 +6,11 @@
 
 ```
 FractalMIDI/
-├── model.py                    # 模型接口（向後兼容）
+├── config/                     # 配置檔案目錄
+│   ├── train_default.yaml      # 預設訓練配置
+│   ├── train_128x128.yaml      # 小尺寸訓練配置
+│   ├── train_ar.yaml           # AR 生成器配置
+│   └── inference_default.yaml  # 推理配置
 ├── models/                     # 模組化模型組件
 │   ├── attention.py            # 注意力機制
 │   ├── blocks.py               # Transformer 區塊
@@ -16,16 +20,27 @@ FractalMIDI/
 │   ├── fractal_gen.py          # 主要 FractalGen 模型
 │   ├── generation.py           # 生成函數
 │   └── utils.py                # 工具函數
+├── docs/                       # 文檔
+│   ├── archive/                # 歷史文檔
+│   ├── MODEL_STRUCTURE.md      # 模型結構說明
+│   ├── TRAINING_GUIDE.md       # 訓練指南
+│   └── ...                     # 其他文檔
+├── tests/                      # 測試檔案
+├── dataset/                    # 數據集列表
 ├── trainer.py                  # PyTorch Lightning 訓練器
 ├── dataset.py                  # MIDI 數據加載與預處理
 ├── visualizer.py               # Piano roll 可視化工具
+├── model.py                    # 模型接口（向後兼容）
 ├── main.py                     # 訓練主程序
 ├── inference.py                # 推理程序
 ├── run_training.sh             # 訓練腳本
-└── run_inference.sh            # 推理腳本
+├── run_inference.sh            # 推理腳本
+└── requirements.txt            # 依賴
 ```
 
 **模組化結構**：模型代碼已重構為模組化結構，提升可讀性和可維護性。詳見 [docs/MODEL_STRUCTURE.md](docs/MODEL_STRUCTURE.md)。
+
+**配置系統**：使用 YAML 配置檔案管理所有超參數，方便實驗管理和版本控制。
 
 ## ⚡ 快速開始
 
@@ -51,10 +66,20 @@ find /path/to/validation/files -name "*.mid" > dataset/valid.txt
 ### 3. 開始訓練
 
 ```bash
-# 使用訓練腳本（推薦）
-bash run_training.sh
+# 使用配置檔案（推薦）
+bash run_training.sh config/train_default.yaml
 
-# 或直接使用 Python
+# 或使用不同的配置
+bash run_training.sh config/train_ar.yaml         # 全 AR 生成器
+bash run_training.sh config/train_128x128.yaml    # 小尺寸快速測試
+
+# 直接使用 Python（配置檔案）
+python main.py --config config/train_default.yaml
+
+# 覆寫配置中的特定參數
+python main.py --config config/train_default.yaml --max_steps 100000 --lr 5e-5
+
+# 或使用命令行參數（向後兼容）
 python main.py \
     --train_batch_size 8 \
     --val_batch_size 8 \
@@ -66,9 +91,14 @@ python main.py \
     --scan_order "row_major"
 ```
 
+**可用的配置檔案：**
+- `config/train_default.yaml`: 預設配置（128x512, MAR generators）
+- `config/train_128x256.yaml`: 中尺寸訓練（128x256, 平衡速度與質量）
+- `config/train_128x128.yaml`: 小尺寸訓練（128x128, 更快）
+
 **配置選項：**
-- `--generator_types`: 每層的生成器類型，可選 `mar` 或 `ar`（例如：`"ar,ar,ar,ar"` 或 `"mar,mar,mar,mar"`）
-- `--scan_order`: AR 生成器的掃描順序
+- `generator_types`: 每層的生成器類型，可選 `mar` 或 `ar`
+- `scan_order`: AR 生成器的掃描順序
   - `row_major`（預設）：先左到右，再上到下（強調時間連續性）
   - `column_major`：先上到下，再左到右（強調和聲結構）
 
@@ -99,17 +129,27 @@ outputs/fractalgen_ar_ar_ar_ar/lightning_logs/version_X/generation_gifs/
 ### 5. 生成 MIDI
 
 ```bash
+# 使用腳本（推薦）
+bash run_inference.sh outputs/fractalgen/checkpoints/step_00100000.ckpt
+
+# 使用配置檔案
+python inference.py \
+    --config config/inference_default.yaml \
+    --checkpoint outputs/fractalgen/checkpoints/step_00100000.ckpt
+
+# 或使用命令行參數（向後兼容）
+
 # 無條件生成
-python inference_fractalgen.py \
-    --checkpoint outputs/fractalgen/checkpoints/last.ckpt \
+python inference.py \
+    --checkpoint outputs/fractalgen/checkpoints/step_00100000.ckpt \
     --mode unconditional \
     --num_samples 10 \
     --generation_length 256 \
     --save_images
 
 # 有條件生成（基於前綴）
-python inference_fractalgen.py \
-    --checkpoint outputs/fractalgen/checkpoints/last.ckpt \
+python inference.py \
+    --checkpoint outputs/fractalgen/checkpoints/step_00100000.ckpt \
     --mode conditional \
     --condition_midi input.mid \
     --condition_length 64 \
@@ -117,8 +157,8 @@ python inference_fractalgen.py \
     --save_images
 
 # Inpainting（局部重新生成）
-python inference_fractalgen.py \
-    --checkpoint outputs/fractalgen/checkpoints/last.ckpt \
+python inference.py \
+    --checkpoint outputs/fractalgen/checkpoints/step_00100000.ckpt \
     --mode inpainting \
     --input_midi input.mid \
     --mask_start 64 \
@@ -193,10 +233,10 @@ Level 2 (1 patch): PianoRollVelocityLoss
 
 ### Patch 劃分
 
-使用 `patch_size=4` 將 piano roll 劃分為 patches:
+使用 `patch_size=4` 將 piano roll 劃分為 patches（pitch 維度固定為 128）:
+- 128x512 → 4096 patches (32x32) [預設]
 - 128x256 → 2048 patches (32x16)
 - 128x128 → 1024 patches (32x8)
-- 128x512 → 4096 patches (32x32)
 
 ## 🎨 可視化
 
@@ -207,36 +247,66 @@ Piano roll 可視化遵循 Logic Pro 風格：
 
 ## 🔧 配置系統
 
-所有配置使用 dataclass 管理：
+### YAML 配置檔案
+
+使用 YAML 檔案管理所有超參數，方便實驗管理：
+
+```yaml
+# config/train_default.yaml 範例
+
+# 模型配置
+model:
+  generator_types: [mar, mar, mar, mar]
+  scan_order: row_major
+  mask_ratio_loc: 1.0
+  mask_ratio_scale: 0.5
+  grad_checkpointing: false
+
+# 訓練配置
+training:
+  max_steps: 200000
+  learning_rate: 1.0e-4
+  weight_decay: 0.05
+  warmup_steps: 2000
+  grad_clip: 3.0
+  accumulate_grad_batches: 1
+  train_batch_size: 8
+  val_batch_size: 8
+
+# 數據配置
+data:
+  train_data: dataset/train.txt
+  val_data: dataset/valid.txt
+  crop_length: 512                        # 時間維度長度（128x512 piano roll）
+  augment_factor: 1
+  pitch_shift_min: -3
+  pitch_shift_max: 3
+
+# 硬體配置
+hardware:
+  devices: [0, 1]
+  num_workers: 4
+  precision: "32"
+
+# 日誌配置
+logging:
+  output_dir: outputs/fractalgen
+  val_check_interval_steps: 2000
+  checkpoint_every_n_steps: 2000
+  log_images_every_n_steps: 5000
+```
+
+### Dataclass 配置（內部）
+
+程式碼內部使用 dataclass 管理配置：
 
 ```python
-# model.py
-@dataclass
-class MARConfig:
-    embed_dim: int = 768
-    num_blocks: int = 16
-    num_heads: int = 12
-    patch_size: int = 4
-    # ...
-
-# dataset.py
-@dataclass
-class MIDIDatasetConfig:
-    augment_factor: int = 1
-    cache_in_memory: bool = True
-    cache_dir: str | None = None
-    pitch_shift_range: tuple[int, int] = (-3, 3)
-    generator_type_list: tuple[str, str, str, str] = ("mar", "mar", "mar", "mar")
-    # ...
-
 # trainer.py
 @dataclass
 class FractalTrainerConfig:
     max_steps: int = 200000
     grad_clip: float = 3.0
     accumulate_grad_batches: int = 1
-    val_check_interval_steps: int = 2000
-    checkpoint_every_n_steps: int = 2000
     # ...
 
 # dataset.py
@@ -244,11 +314,10 @@ class FractalTrainerConfig:
 class DataLoaderConfig:
     num_workers: int = 4
     pin_memory: bool = True
-    prefetch_factor: int = 2
-    persistent_workers: bool = True
-    patch_size: int = 4
     # ...
 ```
+
+YAML 配置會自動轉換為對應的 dataclass 實例。
 
 ## 📈 訓練流程
 
@@ -283,7 +352,11 @@ for level in [0, 1, 2]:
 ### 推薦設置
 
 ```bash
-python main_fractalgen.py \
+# 使用配置檔案（推薦）
+python main.py --config config/train_default.yaml
+
+# 或使用命令行參數
+python main.py \
     --train_batch_size 8 \
     --val_batch_size 8 \
     --augment_factor 2 \
@@ -316,8 +389,8 @@ python main_fractalgen.py \
 
 ### 2. 長序列
 
-- **限制**: 預設 `max_seq_len=2100`，可處理 128x256 左右的輸入
-- **解決**: 如需更長序列，調整 `TrainerConfig.max_seq_len`
+- **限制**: 預設 `max_seq_len=2100`，可處理 128x256 左右的輸入；對於 128x512 需要更大的 `max_seq_len`
+- **解決**: 如需更長序列（如 128x512），調整 `TrainerConfig.max_seq_len` 至少為 4096
 
 ### 3. 記憶體使用
 
@@ -325,10 +398,19 @@ python main_fractalgen.py \
 
 ## 📚 參考文件
 
-- **詳細技術**: `FRACTALGEN_COMPLETE.md`
-- **快速開始**: `QUICK_START_FRACTALGEN.md`
-- **當前狀態**: `FRACTAL_STATUS.md`
-- **實現總結**: `IMPLEMENTATION_SUMMARY.md`
+### 文檔目錄
+
+- **訓練指南**: [docs/TRAINING_GUIDE.md](docs/TRAINING_GUIDE.md)
+- **模型結構**: [docs/MODEL_STRUCTURE.md](docs/MODEL_STRUCTURE.md)
+- **GIF 生成**: [docs/GIF_GENERATION_GUIDE.md](docs/GIF_GENERATION_GUIDE.md)
+- **Checkpoint 指南**: [docs/CHECKPOINT_MISMATCH_GUIDE.md](docs/CHECKPOINT_MISMATCH_GUIDE.md)
+
+### 歷史文檔（存檔）
+
+- [docs/archive/](docs/archive/)
+
+### 原始參考
+
 - **原論文**: https://arxiv.org/abs/2401.05036
 - **原代碼**: https://github.com/Yikai-Liao/fractalgen
 
@@ -461,7 +543,7 @@ num_iter_list = [16, 8, 1]  # 最慢
 
 ```bash
 # 快速測試（1個 batch）
-python main_fractalgen.py --fast_dev_run
+python main.py --config config/train_default.yaml --fast_dev_run
 
 # 檢查模型
 python -c "
@@ -472,8 +554,10 @@ print(f'Parameters: {sum(p.numel() for p in model.parameters())/1e6:.1f}M')
 
 # 檢查數據
 python -c "
-from dataset import create_dataloader
-loader = create_dataloader('dataset/train.txt', batch_size=2)
+from dataset import create_dataloader, DataLoaderConfig
+cfg = DataLoaderConfig.training_default('dataset/train.txt')
+cfg.sampler.batch_size = 2
+loader = create_dataloader(config=cfg)
 for i, batch in enumerate(loader):
     print(f'Batch {i}: {batch[0].shape}')
     if i >= 2: break
@@ -505,7 +589,7 @@ for i, batch in enumerate(loader):
 **🎉 開始你的 FractalGen MIDI 生成之旅吧！**
 
 如有問題，請查閱：
-- `FRACTALGEN_COMPLETE.md` - 完整技術細節
-- `FRACTAL_STATUS.md` - 當前實現狀態
-- `IMPLEMENTATION_SUMMARY.md` - 功能總結
+- [docs/TRAINING_GUIDE.md](docs/TRAINING_GUIDE.md) - 訓練指南
+- [docs/MODEL_STRUCTURE.md](docs/MODEL_STRUCTURE.md) - 模型結構
+- [docs/](docs/) - 完整文檔目錄
 

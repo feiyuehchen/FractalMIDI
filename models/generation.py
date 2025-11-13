@@ -12,7 +12,7 @@ def conditional_generation(model, condition_roll, generation_length, num_iter_li
     
     Args:
         model: FractalGen model
-        condition_roll: Conditioning piano roll (1, 128, cond_length)
+        condition_roll: Conditioning piano roll (1, piano_roll_height, cond_length)
         generation_length: Number of steps to generate
         num_iter_list: Iteration list for each level
         cfg: Classifier-free guidance strength
@@ -20,18 +20,20 @@ def conditional_generation(model, condition_roll, generation_length, num_iter_li
         filter_threshold: Filter threshold for low probability tokens
     
     Returns:
-        Generated piano roll (1, 128, cond_length + generation_length)
+        Generated piano roll (1, piano_roll_height, cond_length + generation_length)
     """
     device = condition_roll.device
+    piano_roll_height = model.config.piano_roll.height
+    patch_size = model.config.piano_roll.patch_size
+    
     cond_length = condition_roll.shape[2]
     total_length = cond_length + generation_length
     
-    # Pad to patch size (4)
-    patch_size = 4
+    # Pad to patch size
     padded_length = ((total_length + patch_size - 1) // patch_size) * patch_size
     
     # Create full piano roll with condition
-    full_roll = torch.zeros(1, 1, 128, padded_length, device=device)
+    full_roll = torch.zeros(1, 1, piano_roll_height, padded_length, device=device)
     full_roll[:, :, :, :cond_length] = condition_roll
     
     # For true conditional generation, we need to implement partial masking
@@ -56,7 +58,7 @@ def conditional_generation(model, condition_roll, generation_length, num_iter_li
     # Trim to target length
     generated = generated[:, :, :, :total_length]
     
-    return generated.squeeze(1)  # Return (1, 128, total_length)
+    return generated.squeeze(1)  # Return (1, piano_roll_height, total_length)
 
 
 @torch.no_grad()
@@ -67,7 +69,7 @@ def inpainting_generation(model, piano_roll, mask_start, mask_end, num_iter_list
     
     Args:
         model: FractalGen model
-        piano_roll: Input piano roll (1, 128, duration)
+        piano_roll: Input piano roll (1, piano_roll_height, duration)
         mask_start: Start of mask region (in time steps)
         mask_end: End of mask region (in time steps)
         num_iter_list: Iteration list for each level
@@ -76,17 +78,19 @@ def inpainting_generation(model, piano_roll, mask_start, mask_end, num_iter_list
         filter_threshold: Filter threshold for low probability tokens
     
     Returns:
-        Inpainted piano roll (1, 128, duration)
+        Inpainted piano roll (1, piano_roll_height, duration)
     """
     device = piano_roll.device
+    piano_roll_height = model.config.piano_roll.height
+    patch_size = model.config.piano_roll.patch_size
+    
     duration = piano_roll.shape[2]
     
     # Pad to patch size
-    patch_size = 4
     padded_duration = ((duration + patch_size - 1) // patch_size) * patch_size
     
     # Create padded version with masked region zeroed
-    padded_roll = torch.zeros(1, 1, 128, padded_duration, device=device)
+    padded_roll = torch.zeros(1, 1, piano_roll_height, padded_duration, device=device)
     padded_roll[:, :, :, :duration] = piano_roll.unsqueeze(1) if piano_roll.dim() == 3 else piano_roll
     
     # For true inpainting, we need patch-level masking
@@ -114,7 +118,7 @@ def inpainting_generation(model, piano_roll, mask_start, mask_end, num_iter_list
     # Trim to original length
     result = result[:, :, :, :duration]
     
-    return result.squeeze(1)  # Return (1, 128, duration)
+    return result.squeeze(1)  # Return (1, piano_roll_height, duration)
 
 
 # ==============================================================================

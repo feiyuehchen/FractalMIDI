@@ -30,12 +30,13 @@ class PianoRollVelocityLoss(nn.Module):
     Velocity prediction loss for piano roll patches.
     Adapted from PixelLoss for single-channel velocity values.
     """
-    def __init__(self, c_channels, width, depth, num_heads, v_weight=1.0, level_index: int = 3):
+    def __init__(self, c_channels, width, depth, num_heads, v_weight=1.0, level_index: int = 3, velocity_vocab_size=256):
         super().__init__()
 
         self.level_index = level_index
+        self.velocity_vocab_size = velocity_vocab_size
         self.cond_proj = nn.Linear(c_channels, width)
-        self.v_codebook = nn.Embedding(256, width)  # Velocity codebook [0-255]
+        self.v_codebook = nn.Embedding(velocity_vocab_size, width)  # Velocity codebook [0-255]
 
         self.ln = nn.LayerNorm(width, eps=1e-6)
         self.blocks = nn.ModuleList([
@@ -47,7 +48,7 @@ class PianoRollVelocityLoss(nn.Module):
         self.norm = nn.LayerNorm(width, eps=1e-6)
 
         self.v_weight = v_weight
-        self.v_mlm = MlmLayer(256)
+        self.v_mlm = MlmLayer(velocity_vocab_size)
 
         self.criterion = torch.nn.CrossEntropyLoss(reduction="none")
 
@@ -105,9 +106,19 @@ class PianoRollVelocityLoss(nn.Module):
             loss = loss_v
 
         loss_mean = loss.mean()
+        
+        # Compute entropy more memory-efficiently
+        # For velocity_loss, logits is (batch, 256), sample subset of batch to save memory
+        with torch.no_grad():
+            batch_size = logits.size(0)
+            subset_size = min(16, batch_size)  # Only compute on subset of batch
+            indices = torch.randperm(batch_size, device=logits.device)[:subset_size]
+            logits_subset = logits[indices].detach()
+            entropy = torch.distributions.Categorical(logits=logits_subset).entropy().mean()
+        
         stats = {
             f'level_{self.level_index}/velocity_loss': loss_mean.detach(),
-            f'level_{self.level_index}/velocity_entropy': torch.distributions.Categorical(logits=logits.detach()).entropy().mean()
+            f'level_{self.level_index}/velocity_entropy': entropy
         }
 
         return loss_mean, stats
@@ -119,19 +130,15 @@ class PianoRollVelocityLoss(nn.Module):
         else:
             bsz = cond_list[0].size(0) // 2
         
-        # Initialize with -1 (white/silence) instead of 0
-        # This allows the model to "paint" notes onto a white canvas
-        velocity_values = torch.full((bsz, 1), -1.0, device=cond_list[0].device)
-        
-        # Convert to [0, 1] range for prediction (predict expects float in [0, 1])
-        # -1 maps to 0 (silence), 1 maps to 1 (loud)
-        velocity_for_pred = (velocity_values + 1.0) / 2.0
+        # Initialize with 0 (silence) for unconditional generation
+        # For training, -1 is used as mask token, but for sampling we start from silence
+        velocity_values = torch.zeros((bsz, 1), device=cond_list[0].device)
 
         if cfg == 1.0:
-            logits, _ = self.predict(velocity_for_pred, cond_list)
+            logits, _ = self.predict(velocity_values, cond_list)
         else:
             logits, _ = self.predict(
-                torch.cat([velocity_for_pred, velocity_for_pred], dim=0),
+                torch.cat([velocity_values, velocity_values], dim=0),
                 cond_list
             )
         
@@ -165,9 +172,9 @@ class PianoRollVelocityLoss(nn.Module):
         
         sampled_ids = torch.multinomial(probs, num_samples=1).reshape(-1)
         
-        # Convert back to [-1, 1] range
-        # 0 -> -1 (silence/white), 255 -> 1 (loud/black)
-        velocity_values[:, 0] = (sampled_ids.float() / 255.0) * 2.0 - 1.0
+        # Convert to [0, 1] range
+        # 0 -> 0 (silence), 255 -> 1 (max velocity)
+        velocity_values[:, 0] = sampled_ids.float() / 255.0
 
         # Reshape to (bsz, 1, 1, 1) which represents a 1x1 patch
         velocity_values = velocity_values.view(bsz, 1, 1, 1)

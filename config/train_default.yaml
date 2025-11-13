@@ -1,0 +1,75 @@
+# Default training configuration for FractalGen MIDI model
+# 128x512 piano roll with MAR generators
+
+# Model configuration
+model:
+  # Piano roll settings
+  piano_roll_height: 128                  # MIDI pitch range (21-108 → 128 bins)
+  patch_size: 4                           # Patch size for tokenization
+  velocity_vocab_size: 256                # MIDI velocity range [0-255]
+  
+  # Architecture (4 levels: 128→16→4→1)
+  img_size_list: [128, 16, 4, 1]         # Image sizes for each level
+  embed_dim_list: [512, 256, 128, 64]    # Embedding dimensions per level
+  num_blocks_list: [12, 3, 2, 1]         # Number of transformer blocks per level
+  num_heads_list: [8, 4, 2, 2]           # Number of attention heads per level
+  attn_dropout: 0.0                       # Attention dropout rate
+  proj_dropout: 0.0                       # Projection dropout rate
+  init_std: 0.02                          # Weight initialization std
+  
+  # Generator configuration
+  generator_types: [mar, mar, mar, mar]  # Options: mar or ar
+  scan_order: row_major                   # Options: row_major or column_major (for AR)
+  mask_ratio_loc: 1.0                     # Mean mask ratio (1.0 = 100%, 0.5 = 50%)
+  mask_ratio_scale: 0.5                   # Std dev of mask ratio
+  num_conds: 5                            # Number of conditioning embeddings
+  
+  # Training settings
+  grad_checkpointing: true                # Enable to save memory (slower)
+  v_weight: 1.0                           # Weight for velocity loss
+
+# Training configuration
+training:
+  max_steps: 50000
+  learning_rate: 1.0e-4
+  weight_decay: 0.05
+  warmup_steps: 2000
+  grad_clip: 3.0
+  accumulate_grad_batches: 16
+  train_batch_size: 16
+  val_batch_size: 4
+
+# Data configuration
+data:
+  train_data: dataset/train.txt
+  val_data: dataset/valid.txt
+  crop_length: 512                        # 128x512 piano roll
+  augment_factor: 5                       # Random crop augmentation factor
+  pitch_shift_min: -12                    # Minimum pitch shift (semitones)
+  pitch_shift_max: 12                     # Maximum pitch shift (semitones)
+  cache_in_memory: true
+  cache_dir: null
+
+# Hardware configuration
+hardware:
+  devices: [0, 1]                         # GPU indices
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
+  pin_memory: true
+  precision: "32"                         # Options: 32, 16, bf16
+
+# Logging and checkpointing
+logging:
+  output_dir: outputs/fractalgen_all_mar
+  log_every_n_steps: 50
+  val_check_interval_steps: 10000
+  checkpoint_every_n_steps: 10000
+  save_top_k: 3
+  log_images_every_n_steps: 10000
+  num_images_to_log: 4
+
+# Other
+seed: 42
+fast_dev_run: false
+

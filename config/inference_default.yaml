@@ -1,0 +1,39 @@
+# Default inference configuration for FractalGen MIDI model
+
+# Model checkpoint
+checkpoint: null                          # Path to model checkpoint (required)
+
+# Generation mode
+mode: unconditional                       # Options: unconditional, conditional, inpainting
+
+# Unconditional generation settings
+unconditional:
+  num_samples: 10
+  length: 512                             # Generation length (time steps, 128x512 piano roll)
+  temperature: 1.0                        # Sampling temperature
+
+# Conditional generation settings (prefix-based)
+conditional:
+  condition_midi: null                    # Input MIDI file path
+  generation_length: 512                  # Length to generate after prefix
+  temperature: 1.0
+
+# Inpainting settings
+inpainting:
+  input_midi: null                        # Input MIDI file path
+  mask_start: 128                         # Start position of mask
+  mask_end: 384                           # End position of mask
+  temperature: 1.0
+
+# Output settings
+output:
+  output_dir: outputs/inference
+  save_midi: true
+  save_png: true
+  save_gif: false                         # Save generation process as GIF
+  gif_fps: 2
+
+# Hardware
+device: cuda:0                            # Device to use for inference
+seed: 42
+

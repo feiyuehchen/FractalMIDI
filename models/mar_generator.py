@@ -8,10 +8,10 @@ import scipy.stats as stats
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-
+import torch.nn.functional as F
 from .utils import mask_by_order
 from .blocks import Block
-
+import math
 
 class PianoRollMAR(nn.Module):
     """
@@ -20,11 +20,14 @@ class PianoRollMAR(nn.Module):
     """
     def __init__(self, seq_len, patch_size, cond_embed_dim, embed_dim, num_blocks, num_heads,
                  attn_dropout=0.1, proj_dropout=0.1, num_conds=5, guiding_pixel=False, grad_checkpointing=False,
-                 max_seq_len=None, img_size=128, mask_ratio_loc=1.0, mask_ratio_scale=0.5):
+                 max_seq_len=None, img_size=128, mask_ratio_loc=1.0, mask_ratio_scale=0.5,
+                 piano_roll_height=128, velocity_vocab_size=256):
         super().__init__()
 
         self.seq_len = seq_len  # Expected sequence length (for square images)
         self.max_seq_len = max_seq_len or (seq_len * 4)  # Support longer sequences
+        self.piano_roll_height = piano_roll_height  # Piano roll height (MIDI pitch range)
+        self.velocity_vocab_size = velocity_vocab_size  # Velocity vocabulary size
         self.patch_size = patch_size
         self.embed_dim = embed_dim  # Store embed_dim as instance variable
         self.num_conds = num_conds
@@ -181,8 +184,8 @@ class PianoRollMAR(nn.Module):
         h = int(np.sqrt(seq_len))
         w = seq_len // h
         if h * w != seq_len:
-            # Non-square: adjust
-            h = 128 // self.patch_size  # Known height
+            # Non-square: adjust (use configured piano roll height)
+            h = self.piano_roll_height // self.patch_size
             w = seq_len // h
 
         middle_cond_grid = middle_cond.reshape(bsz, h, w, c)
@@ -271,8 +274,14 @@ class PianoRollMAR(nn.Module):
         return patches, cond_list_next, guiding_pixel_loss, stats
 
     def sample(self, cond_list, num_iter, cfg, cfg_schedule, temperature, filter_threshold,
-               next_level_sample_function, visualize=False, _intermediates_list=None, _current_level=None, _patch_pos=None):
-        """Iterative refinement sampling."""
+               next_level_sample_function, visualize=False, _intermediates_list=None, _current_level=None, _patch_pos=None, target_width=None):
+        """
+        Iterative refinement sampling.
+        
+        Args:
+            target_width: Target width for generation at Level 0 only (128, 256, 512, etc.)
+                         For other levels, this should be None and will use square patches.
+        """
         if cfg == 1.0:
             bsz = cond_list[0].size(0)
         else:
@@ -287,10 +296,15 @@ class PianoRollMAR(nn.Module):
             cond_list.append(sampled_pixels)
 
         # Initialize token mask and patches (all zeros for clean start)
-        # For piano roll: calculate actual sequence length based on img_size
+        # For Level 0 (img_size=128): use target_width to support variable widths
+        # For other levels: generate square patches (width = height = img_size)
         h_patches = self.img_size // self.patch_size
-        # For piano roll, width is 2x height (256 vs 128)
-        w_patches = h_patches * 2 if _current_level == 0 else h_patches
+        if target_width is not None and self.img_size == 128:
+            # Level 0: variable width
+            w_patches = target_width // self.patch_size
+        else:
+            # Other levels: square patches
+            w_patches = h_patches
         actual_seq_len = h_patches * w_patches
 
         if _intermediates_list is None:
@@ -308,8 +322,9 @@ class PianoRollMAR(nn.Module):
             )
         
         mask = torch.ones(bsz, actual_seq_len, device=cond_list[0].device)
-        # Initialize with -1 (white/silence) instead of 0
-        patches = torch.full((bsz, actual_seq_len, 1 * self.patch_size**2), -1.0, device=cond_list[0].device)
+        # Initialize with 0 (silence) for unconditional generation
+        # During training, -1 is used as mask token, but for sampling we start from silence
+        patches = torch.zeros((bsz, actual_seq_len, 1 * self.patch_size**2), device=cond_list[0].device)
         orders = self.sample_orders(bsz, actual_seq_len, device=cond_list[0].device)
         num_iter = min(actual_seq_len, num_iter)
         
@@ -501,8 +516,9 @@ class PianoRollMAR(nn.Module):
 
         patch_dim = self.patch_size ** 2
         mask = torch.ones(base_bsz, seq_len, device=device, dtype=torch.bool)
-        # Initialize with -1 (white/silence) instead of 0
-        patches = torch.full((base_bsz, seq_len, patch_dim), -1.0, device=device, dtype=dtype)
+        # Initialize with 0 (silence) for unconditional generation
+        # During training, -1 is used as mask token, but for sampling we start from silence
+        patches = torch.zeros((base_bsz, seq_len, patch_dim), device=device, dtype=dtype)
         orders = self.sample_orders(base_bsz, seq_len, device=device)
         num_iter = min(num_iter, seq_len)
 

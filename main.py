@@ -1,64 +1,84 @@
 """
-Main training script for the FractalGen MIDI model (single configuration).
+Main training script for the FractalGen MIDI model.
 
 Usage:
-    python main_fractalgen.py --train_batch_size 8 --max_steps 200000 --devices 0,1
+    # Using config file
+    python main.py --config config/train_default.yaml
+    
+    # Using command line arguments (legacy)
+    python main.py --train_batch_size 8 --max_steps 200000 --devices 0,1
+    
+    # Override config with command line arguments
+    python main.py --config config/train_default.yaml --max_steps 100000
 """
 
 import argparse
-import math
-import os
 from pathlib import Path
 
-import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from dataset import create_dataloader, DataLoaderConfig
-from trainer import FractalMIDILightningModule, FractalTrainerConfig, create_trainer
+from trainer import FractalMIDILightningModule, create_trainer
+from train_utils import (
+    load_config,
+    merge_config_with_args,
+    apply_config_defaults,
+    save_config_to_checkpoint_dir,
+    print_training_summary,
+    print_model_info,
+    setup_trainer_config,
+    setup_dataloaders,
+    compute_validation_schedule
+)
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Train FractalGen MIDI model')
     
+    # Config file
+    parser.add_argument('--config', type=str, default=None,
+                       help='Path to YAML config file (e.g., config/train_default.yaml)')
+    
     # Data paths
-    parser.add_argument('--train_data', type=str, default='dataset/train.txt',
+    parser.add_argument('--train_data', type=str, default=None,
                        help='Path to training data list')
-    parser.add_argument('--val_data', type=str, default='dataset/valid.txt',
+    parser.add_argument('--val_data', type=str, default=None,
                        help='Path to validation data list')
     
     # Training configuration
-    parser.add_argument('--train_batch_size', type=int, default=8,
+    parser.add_argument('--train_batch_size', type=int, default=None,
                        help='Training batch size per device')
-    parser.add_argument('--val_batch_size', type=int, default=8,
+    parser.add_argument('--val_batch_size', type=int, default=None,
                        help='Validation batch size per device')
-    parser.add_argument('--augment_factor', type=int, default=1,
+    parser.add_argument('--crop_length', type=int, default=None,
+                       help='Crop length for training data (128 for 128x128, 256 for 128x256, 512 for 128x512)')
+    parser.add_argument('--augment_factor', type=int, default=None,
                        help='Random crop augmentation factor for training data')
-    parser.add_argument('--pitch_shift_min', type=int, default=-3,
+    parser.add_argument('--pitch_shift_min', type=int, default=None,
                        help='Minimum semitone shift for pitch augmentation (inclusive)')
-    parser.add_argument('--pitch_shift_max', type=int, default=3,
+    parser.add_argument('--pitch_shift_max', type=int, default=None,
                        help='Maximum semitone shift for pitch augmentation (inclusive)')
-    parser.add_argument('--max_steps', type=int, default=200000,
+    parser.add_argument('--max_steps', type=int, default=None,
                        help='Maximum number of optimizer update steps')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=None,
                        help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.05,
+    parser.add_argument('--weight_decay', type=float, default=None,
                        help='Weight decay')
-    parser.add_argument('--warmup_steps', type=int, default=2000,
+    parser.add_argument('--warmup_steps', type=int, default=None,
                        help='Number of learning-rate warmup steps')
-    parser.add_argument('--grad_clip', type=float, default=3.0,
+    parser.add_argument('--grad_clip', type=float, default=None,
                        help='Gradient clipping value')
-    parser.add_argument('--accumulate_grad_batches', type=int, default=1,
+    parser.add_argument('--accumulate_grad_batches', type=int, default=None,
                        help='Gradient accumulation steps')
     
     # Hardware configuration
-    parser.add_argument('--devices', type=str, default='0,1',
+    parser.add_argument('--devices', type=str, default=None,
                        help='Comma-separated GPU indices (e.g., "0,1")')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=None,
                        help='Number of data loading workers')
-    parser.add_argument('--prefetch_factor', type=int, default=2,
+    parser.add_argument('--prefetch_factor', type=int, default=None,
                        help='Prefetch batches per worker (set 0 to disable)')
     parser.add_argument('--disable_persistent_workers', action='store_true',
                        help='Disable persistent workers in DataLoader')
@@ -112,8 +132,20 @@ def parse_args():
 
 def main():
     """Main training function."""
-    args = parse_args()
+    # Parse and merge configuration
+    cmd_args = parse_args()
+    config_yaml = None
+    if cmd_args.config:
+        config_path = Path(cmd_args.config)
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        print(f"Loading config from: {config_path}")
+        config_yaml = load_config(config_path)
+        args = merge_config_with_args(config_yaml, cmd_args)
+    else:
+        args = apply_config_defaults(cmd_args)
     
+    # Validate arguments
     if args.pitch_shift_min > args.pitch_shift_max:
         raise ValueError('pitch_shift_min must be <= pitch_shift_max')
     
@@ -122,126 +154,60 @@ def main():
     
     # Parse GPU indices
     gpu_indices = [int(x) for x in args.devices.split(',')]
-    print(f"\n{'='*70}")
-    print(f"FractalGen MIDI Training")
-    print(f"{'='*70}")
-    print(f"Model: FractalGen (128→16→4→1)")
-    print(f"Train batch size: {args.train_batch_size}")
-    print(f"Val batch size: {args.val_batch_size}")
-    print(f"Max steps: {args.max_steps}")
-    print(f"Val interval: every {args.val_check_interval_steps} steps")
-    print(f"Checkpoint interval: every {args.checkpoint_every_n_steps} steps")
-    print(f"Grad accumulation: {args.accumulate_grad_batches}")
-    print(f"GPUs: {gpu_indices}")
-    print(f"Output dir: {args.output_dir}")
-    print(f"Generator types: {args.generator_types}")
-    print(f"Pitch shift augmentation: [{args.pitch_shift_min}, {args.pitch_shift_max}] semitones")
-    print(f"{'='*70}\n")
     
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create trainer configuration
-    print("Creating configuration...")
-    config = FractalTrainerConfig(
-        max_steps=args.max_steps,
-        grad_clip=args.grad_clip,
-        accumulate_grad_batches=args.accumulate_grad_batches,
-        log_every_n_steps=args.log_every_n_steps,
-        val_check_interval_steps=args.val_check_interval_steps,
-        checkpoint_every_n_steps=args.checkpoint_every_n_steps,
-        log_images_every_n_steps=args.log_images_every_n_steps,
-        num_images_to_log=args.num_images_to_log,
-        save_top_k=args.save_top_k
-    )
-    
-    config.precision = args.precision
-    config.optimizer.lr = args.lr
-    config.optimizer.weight_decay = args.weight_decay
-    config.scheduler.warmup_steps = args.warmup_steps
-    config.model.grad_checkpointing = args.grad_checkpoint
-    
-    print(f"✓ Model: FractalGen (128→16→4→1)")
-    print(f"✓ Learning rate: {args.lr}")
-    print(f"✓ Warmup steps: {args.warmup_steps}")
-    print(f"✓ Grad clip: {args.grad_clip}")
-    print(f"✓ Accumulate grad batches: {args.accumulate_grad_batches}")
+    # Setup trainer configuration
+    config, generator_types = setup_trainer_config(args)
     
     # Create dataloaders
-    print("\nCreating dataloaders...")
-    pin_memory = not args.no_pin_memory
-    persistent_workers = not args.disable_persistent_workers and args.num_workers > 0
-    prefetch_factor = max(0, args.prefetch_factor if args.num_workers > 0 else 0)
-
-    train_loader_cfg = DataLoaderConfig.training_default(args.train_data)
-    train_loader_cfg.dataset.augment_factor = args.augment_factor
-    train_loader_cfg.dataset.cache_in_memory = not args.no_cache_in_memory
-    train_loader_cfg.dataset.cache_dir = args.cache_dir
-    train_loader_cfg.dataset.pitch_shift_range = (args.pitch_shift_min, args.pitch_shift_max)
-    train_loader_cfg.num_workers = args.num_workers
-    train_loader_cfg.pin_memory = pin_memory
-    train_loader_cfg.prefetch_factor = prefetch_factor if args.num_workers > 0 else 0
-    train_loader_cfg.persistent_workers = persistent_workers
-    train_loader_cfg.sampler.batch_size = args.train_batch_size
-    train_loader_cfg.use_bucket_sampler = False
-
-    val_loader_cfg = DataLoaderConfig.validation_default(args.val_data)
-    val_loader_cfg.dataset.random_crop = False
-    val_loader_cfg.dataset.augment_factor = 1
-    val_loader_cfg.dataset.cache_in_memory = not args.no_cache_in_memory
-    val_loader_cfg.dataset.cache_dir = args.cache_dir
-    val_loader_cfg.dataset.pitch_shift_range = (0, 0)
-    val_loader_cfg.num_workers = args.num_workers
-    val_loader_cfg.pin_memory = pin_memory
-    val_loader_cfg.prefetch_factor = prefetch_factor if args.num_workers > 0 else 0
-    val_loader_cfg.persistent_workers = persistent_workers
-    val_loader_cfg.sampler.batch_size = args.val_batch_size
-    val_loader_cfg.use_bucket_sampler = args.use_bucket_sampler
-    if not args.use_bucket_sampler:
-        val_loader_cfg.sampler.shuffle = False
-
-    generator_types = tuple(type_str.strip() for type_str in args.generator_types.split(','))
-    if len(generator_types) != 4:
-        raise ValueError('generator_types must contain exactly 4 comma-separated values (e.g., "mar,mar,mar,mar")')
-    for idx, g in enumerate(generator_types):
-        if g not in {'mar', 'ar'}:
-            raise ValueError(f'generator_types entry {idx} must be "mar" or "ar", got "{g}"')
-
-    config.model.generator_type_list = generator_types
-    config.model.scan_order = args.scan_order
-    config.model.mask_ratio_loc = args.mask_ratio_loc
-    config.model.mask_ratio_scale = args.mask_ratio_scale
-
-    train_loader = create_dataloader(config=train_loader_cfg)
-    val_loader = create_dataloader(config=val_loader_cfg)
+    train_loader, val_loader = setup_dataloaders(args)
     
-    train_batches = max(1, len(train_loader))
-    val_interval_steps = max(1, args.val_check_interval_steps)
-    quotient, remainder = divmod(val_interval_steps, train_batches)
-    if remainder == 0:
-        trainer_val_check_interval = 1.0
-        trainer_check_val_every_n_epoch = max(1, quotient)
-    else:
-        trainer_val_check_interval = remainder / train_batches
-        trainer_check_val_every_n_epoch = quotient + 1 if quotient > 0 else 1
+    # Compute validation schedule
+    train_batches = len(train_loader)
+    val_batches = len(val_loader)
+    val_interval_steps = args.val_check_interval_steps
+    trainer_val_check_interval, trainer_check_val_every_n_epoch = compute_validation_schedule(
+        train_batches, val_interval_steps
+    )
     
-    print(f"✓ Train batches: {train_batches}")
-    print(f"✓ Val batches: {len(val_loader)}")
-    print(f"✓ Validation schedule: every {val_interval_steps} steps -> val_check_interval={trainer_val_check_interval:.4f}, check_val_every_n_epoch={trainer_check_val_every_n_epoch}")
+    # Print training summary
+    print_training_summary(
+        args, gpu_indices, train_batches, val_batches, val_interval_steps,
+        trainer_val_check_interval, trainer_check_val_every_n_epoch
+    )
     
     # Create model
     print("\nCreating model...")
     model = FractalMIDILightningModule(config)
+    print_model_info(model)
     
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"✓ Total parameters: {total_params/1e6:.2f}M")
+    # Logger (create first to get version number)
+    logger = TensorBoardLogger(
+        save_dir=output_dir,
+        name='logs'
+    )
+    
+    # Use the same version as logger for checkpoints
+    version = logger.version
+    checkpoint_dir = output_dir / 'checkpoints' / f'version_{version}'
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"✓ Experiment version: {version}")
+    print(f"✓ Checkpoint dir: {checkpoint_dir}")
+    
+    # Save config to checkpoint directory
+    config_save_path = save_config_to_checkpoint_dir(
+        checkpoint_dir, cmd_args.config, args, config, generator_types, gpu_indices
+    )
     
     # Callbacks
     checkpoint_steps = max(1, config.checkpoint_every_n_steps)
     callbacks = [
         ModelCheckpoint(
-            dirpath=output_dir / 'checkpoints',
+            dirpath=checkpoint_dir,
             filename='step_{step:08d}-val_loss_{val_loss:.4f}',
             monitor=None,
             mode='min',
@@ -254,12 +220,6 @@ def main():
         ),
         LearningRateMonitor(logging_interval='step')
     ]
-    
-    # Logger
-    logger = TensorBoardLogger(
-        save_dir=output_dir,
-        name='logs'
-    )
     
     # Create trainer
     print("\nCreating trainer...")
@@ -289,9 +249,11 @@ def main():
         print(f"\n{'='*70}")
         print("Training completed successfully!")
         print(f"{'='*70}")
-        print(f"Checkpoints saved to: {output_dir / 'checkpoints'}")
-        print(f"TensorBoard logs: {output_dir / 'logs'}")
-        print(f"\nView logs with: tensorboard --logdir {output_dir}")
+        print(f"Experiment version: {version}")
+        print(f"Checkpoints saved to: {checkpoint_dir}")
+        print(f"Config saved to: {config_save_path}")
+        print(f"TensorBoard logs: {output_dir / 'logs' / f'version_{version}'}")
+        print(f"\nView logs with: tensorboard --logdir {output_dir / 'logs'}")
         print(f"{'='*70}\n")
         
     except KeyboardInterrupt:

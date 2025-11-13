@@ -41,6 +41,13 @@ class SchedulerConfig:
 @dataclass
 class ModelConfig:
     """Configuration for the FractalGen piano model."""
+    # Model architecture
+    img_size_list: Tuple[int, ...] = field(default_factory=lambda: (128, 16, 4, 1))
+    embed_dim_list: Tuple[int, ...] = field(default_factory=lambda: (512, 256, 128, 64))
+    num_blocks_list: Tuple[int, ...] = field(default_factory=lambda: (12, 3, 2, 1))
+    num_heads_list: Tuple[int, ...] = field(default_factory=lambda: (8, 4, 2, 2))
+    
+    # Training configuration
     attn_dropout: float = 0.0
     proj_dropout: float = 0.0
     guiding_pixel: bool = False
@@ -61,6 +68,16 @@ class ModelConfig:
                 raise ValueError(f"generator_type_list[{idx}] must be one of {allowed}, got '{g}'")
         if self.scan_order not in {'row_major', 'column_major'}:
             raise ValueError(f"scan_order must be 'row_major' or 'column_major', got '{self.scan_order}'")
+        
+        # Validate architecture lists
+        if len(self.img_size_list) != 4:
+            raise ValueError("img_size_list must contain exactly 4 entries")
+        if len(self.embed_dim_list) != 4:
+            raise ValueError("embed_dim_list must contain exactly 4 entries")
+        if len(self.num_blocks_list) != 4:
+            raise ValueError("num_blocks_list must contain exactly 4 entries")
+        if len(self.num_heads_list) != 4:
+            raise ValueError("num_heads_list must contain exactly 4 entries")
 
 
 @dataclass
@@ -115,9 +132,13 @@ class FractalMIDILightningModule(pl.LightningModule):
         self._last_logged_image_step = -1
         
     def _build_model(self):
-        """Build FractalGen model (128→16→4→1)."""
+        """Build FractalGen model with configurable architecture."""
         model_cfg = self.config.model
         model = fractalmar_piano(
+            img_size_list=model_cfg.img_size_list,
+            embed_dim_list=model_cfg.embed_dim_list,
+            num_blocks_list=model_cfg.num_blocks_list,
+            num_heads_list=model_cfg.num_heads_list,
             attn_dropout=model_cfg.attn_dropout,
             proj_dropout=model_cfg.proj_dropout,
             guiding_pixel=model_cfg.guiding_pixel,

@@ -1,3 +1,36 @@
+# Training outputs
 outputs/
-markdown/
+
+# Python cache
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Checkpoints and models
+*.ckpt
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Data (optional - uncomment if you don't want to track data)
+# dataset/*.mid
+# dataset/*.txt

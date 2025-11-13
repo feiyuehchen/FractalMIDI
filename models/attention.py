@@ -52,7 +52,7 @@ class Attention(nn.Module):
 
 class CausalAttention(nn.Module):
     """
-    Causal (autoregressive) attention module.
+    Causal (autoregressive) attention module with KV Cache support.
     
     Args:
         dim: Input dimension
@@ -77,15 +77,51 @@ class CausalAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
+        
+        # KV Cache: will be set externally when needed
+        self.k_cache = None
+        self.v_cache = None
 
-    def forward(self, x):
+    def forward(self, x, use_cache=False, cache_position=None):
+        """
+        Forward pass with optional KV caching.
+        
+        Args:
+            x: Input tensor (B, N, C)
+            use_cache: If True, use and update KV cache
+            cache_position: Position in cache to update (int), used when use_cache=True
+        
+        Returns:
+            Output tensor (B, N, C)
+        """
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
+        q, k, v = qkv.unbind(0)  # Each: (B, num_heads, N, head_dim)
         q, k = self.q_norm(q), self.k_norm(k)
 
+        if use_cache and self.k_cache is not None and self.v_cache is not None:
+            # Update cache at specified position
+            if cache_position is not None:
+                # Single position update (for autoregressive generation)
+                self.k_cache[:, :, cache_position:cache_position+N, :] = k
+                self.v_cache[:, :, cache_position:cache_position+N, :] = v
+                # Use full cache for attention
+                k_full = self.k_cache[:, :, :cache_position+N, :]
+                v_full = self.v_cache[:, :, :cache_position+N, :]
+            else:
+                # Full sequence update
+                self.k_cache[:, :, :N, :] = k
+                self.v_cache[:, :, :N, :] = v
+                k_full = k
+                v_full = v
+        else:
+            # No cache, use current k and v
+            k_full = k
+            v_full = v
+
+        # Compute attention
         x = scaled_dot_product_attention(
-            q, k, v,
+            q, k_full, v_full,
             dropout_p=self.attn_drop.p if self.training else 0.0,
             is_causal=True
         )

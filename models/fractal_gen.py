@@ -8,6 +8,7 @@ import torch.nn as nn
 from .mar_generator import PianoRollMAR
 from .ar_generator import PianoRollAR
 from .velocity_loss import PianoRollVelocityLoss
+from .model_config import FractalModelConfig, PianoRollConfig, ArchitectureConfig, GeneratorConfig, TrainingConfig
 
 
 class PianoRollFractalGen(nn.Module):
@@ -16,23 +17,83 @@ class PianoRollFractalGen(nn.Module):
     Adapted from FractalGen with recursive structure.
     """
     def __init__(self,
-                 img_size_list,
-                 embed_dim_list,
-                 num_blocks_list,
-                 num_heads_list,
-                 generator_type_list,
-                 attn_dropout=0.1,
-                 proj_dropout=0.1,
+                 img_size_list=None,
+                 embed_dim_list=None,
+                 num_blocks_list=None,
+                 num_heads_list=None,
+                 generator_type_list=None,
+                 attn_dropout=None,
+                 proj_dropout=None,
                  guiding_pixel=False,
-                 num_conds=5,
-                 v_weight=1.0,
-                 grad_checkpointing=False,
+                 num_conds=None,
+                 v_weight=None,
+                 grad_checkpointing=None,
                  fractal_level=0,
-                 scan_order='row_major',
-                 mask_ratio_loc=1.0,
-                 mask_ratio_scale=0.5):
+                 scan_order=None,
+                 mask_ratio_loc=None,
+                 mask_ratio_scale=None,
+                 piano_roll_height=None,
+                 max_crop_length=None,
+                 model_config=None,
+                 init_std=None):
+        """
+        Initialize FractalGen model.
+        
+        Args:
+            model_config: FractalModelConfig object (recommended way to configure)
+            If model_config is None, will use individual parameters with defaults.
+        """
         super().__init__()
 
+        # Load from config if provided, otherwise use individual parameters
+        if model_config is not None:
+            config = model_config
+        else:
+            # Create config from individual parameters (for backward compatibility)
+            config = FractalModelConfig()
+            if img_size_list is not None:
+                config.architecture.img_size_list = tuple(img_size_list)
+            if embed_dim_list is not None:
+                config.architecture.embed_dim_list = tuple(embed_dim_list)
+            if num_blocks_list is not None:
+                config.architecture.num_blocks_list = tuple(num_blocks_list)
+            if num_heads_list is not None:
+                config.architecture.num_heads_list = tuple(num_heads_list)
+            if generator_type_list is not None:
+                config.generator.generator_type_list = tuple(generator_type_list)
+            if attn_dropout is not None:
+                config.architecture.attn_dropout = attn_dropout
+            if proj_dropout is not None:
+                config.architecture.proj_dropout = proj_dropout
+            if num_conds is not None:
+                config.generator.num_conds = num_conds
+            if v_weight is not None:
+                config.training.v_weight = v_weight
+            if grad_checkpointing is not None:
+                config.training.grad_checkpointing = grad_checkpointing
+            if scan_order is not None:
+                config.generator.scan_order = scan_order
+            if mask_ratio_loc is not None:
+                config.generator.mask_ratio_loc = mask_ratio_loc
+            if mask_ratio_scale is not None:
+                config.generator.mask_ratio_scale = mask_ratio_scale
+            if piano_roll_height is not None:
+                config.piano_roll.height = piano_roll_height
+            if max_crop_length is not None:
+                config.piano_roll.max_width = max_crop_length
+            if init_std is not None:
+                config.architecture.init_std = init_std
+        
+        # Store config
+        self.config = config
+        
+        # Extract commonly used values
+        img_size_list = config.architecture.img_size_list
+        embed_dim_list = config.architecture.embed_dim_list
+        num_blocks_list = config.architecture.num_blocks_list
+        num_heads_list = config.architecture.num_heads_list
+        generator_type_list = config.generator.generator_type_list
+        
         # Fractal specifics
         self.fractal_level = fractal_level
         self.num_fractal_levels = len(img_size_list)
@@ -40,7 +101,7 @@ class PianoRollFractalGen(nn.Module):
         # Dummy condition embedding (no class labels for piano rolls)
         if self.fractal_level == 0:
             self.dummy_cond = nn.Parameter(torch.zeros(1, embed_dim_list[0]))
-            torch.nn.init.normal_(self.dummy_cond, std=0.02)
+            torch.nn.init.normal_(self.dummy_cond, std=config.architecture.init_std)
 
         # Generator for current level
         if generator_type_list[fractal_level] == "mar":
@@ -51,10 +112,10 @@ class PianoRollFractalGen(nn.Module):
             raise NotImplementedError
         
         # Calculate seq_len based on patch arrangement
-        # For piano roll: height is fixed at 128, width is variable
-        h_patches = 128 // img_size_list[fractal_level+1]
-        # Assume maximum width of 256 for seq_len calculation
-        max_w_patches = 256 // img_size_list[fractal_level+1]
+        # For piano roll: height from config, width is variable (up to max_width)
+        h_patches = config.piano_roll.height // img_size_list[fractal_level+1]
+        # Maximum width for seq_len calculation
+        max_w_patches = config.piano_roll.max_width // img_size_list[fractal_level+1]
         expected_seq_len = h_patches * max_w_patches
         
         self.img_size = img_size_list[fractal_level]  # Store img_size for this level
@@ -67,44 +128,34 @@ class PianoRollFractalGen(nn.Module):
             embed_dim=embed_dim_list[fractal_level],
             num_blocks=num_blocks_list[fractal_level],
             num_heads=num_heads_list[fractal_level],
-            attn_dropout=attn_dropout,
-            proj_dropout=proj_dropout,
+            attn_dropout=config.architecture.attn_dropout,
+            proj_dropout=config.architecture.proj_dropout,
             guiding_pixel=guiding_pixel if fractal_level > 0 else False,
-            num_conds=num_conds,
-            grad_checkpointing=grad_checkpointing,
+            num_conds=config.generator.num_conds,
+            grad_checkpointing=config.training.grad_checkpointing,
             max_seq_len=expected_seq_len,  # Support longer sequences
             img_size=img_size_list[fractal_level],  # Pass img_size to generator
+            piano_roll_height=config.piano_roll.height,  # Pass height to generator
+            velocity_vocab_size=config.piano_roll.velocity_vocab_size,  # Pass vocab size
         )
         
         # Add scan_order for AR generators
         if generator_type_list[fractal_level] == "ar":
-            generator_kwargs['scan_order'] = scan_order
+            generator_kwargs['scan_order'] = config.generator.scan_order
         
         # Add mask_ratio parameters for MAR generators
         if generator_type_list[fractal_level] == "mar":
-            generator_kwargs['mask_ratio_loc'] = mask_ratio_loc
-            generator_kwargs['mask_ratio_scale'] = mask_ratio_scale
+            generator_kwargs['mask_ratio_loc'] = config.generator.mask_ratio_loc
+            generator_kwargs['mask_ratio_scale'] = config.generator.mask_ratio_scale
         
         self.generator = generator(**generator_kwargs)
 
         # Build next fractal level recursively
         if self.fractal_level < self.num_fractal_levels - 2:
             self.next_fractal = PianoRollFractalGen(
-                img_size_list=img_size_list,
-                embed_dim_list=embed_dim_list,
-                num_blocks_list=num_blocks_list,
-                num_heads_list=num_heads_list,
-                generator_type_list=generator_type_list,
-                attn_dropout=attn_dropout,
-                proj_dropout=proj_dropout,
+                model_config=config,
                 guiding_pixel=guiding_pixel,
-                num_conds=num_conds,
-                v_weight=v_weight,
-                grad_checkpointing=grad_checkpointing,
                 fractal_level=fractal_level+1,
-                scan_order=scan_order,
-                mask_ratio_loc=mask_ratio_loc,
-                mask_ratio_scale=mask_ratio_scale
             )
         else:
             # Final level uses velocity loss
@@ -113,8 +164,9 @@ class PianoRollFractalGen(nn.Module):
                 depth=num_blocks_list[fractal_level+1],
                 width=embed_dim_list[fractal_level+1],
                 num_heads=num_heads_list[fractal_level+1],
-                v_weight=v_weight,
+                v_weight=config.training.v_weight,
                 level_index=fractal_level + 1,
+                velocity_vocab_size=config.piano_roll.velocity_vocab_size,
             )
 
     def forward(self, imgs, cond_list=None):
@@ -147,19 +199,30 @@ class PianoRollFractalGen(nn.Module):
 
     def sample(self, batch_size, cond_list=None, num_iter_list=None, cfg=1.0, cfg_schedule="constant",
                temperature=1.0, filter_threshold=0, fractal_level=0, visualize=False, return_intermediates=False,
-               _intermediates_list=None, _patch_pos=None):
-        """Generate samples recursively, optionally returning intermediate outputs from all levels."""
+               _intermediates_list=None, _patch_pos=None, target_width=None):
+        """
+        Generate samples recursively, optionally returning intermediate outputs from all levels.
+        
+        Args:
+            target_width: Target width for generation. If None, uses config.piano_roll.max_width.
+                         Common values: 128 (for 128x128), 256 (for 128x256), 512 (for 128x512)
+        """
+        # Use config max_width if target_width not specified
+        if target_width is None:
+            target_width = self.config.piano_roll.max_width
+        
         if cond_list is None:
             # Use dummy condition
             dummy_embedding = self.dummy_cond.expand(batch_size, -1)
-            cond_list = [dummy_embedding for _ in range(5)]
+            cond_list = [dummy_embedding for _ in range(self.config.generator.num_conds)]
 
         # Initialize intermediates with accumulation canvas at top level
         if return_intermediates and fractal_level == 0 and _intermediates_list is None:
             _intermediates_list = {
                 'frames': [],  # List of intermediate frames
-                # Initialize with -1 (white/silence) instead of 0
-                'canvas': torch.full((batch_size, 1, 128, 256), -1.0)  # Accumulation canvas (128x256 for piano roll)
+                # Initialize with 0 (silence) for unconditional generation
+                # During training, -1 is used as mask token, but for sampling we start from silence
+                'canvas': torch.zeros((batch_size, 1, self.config.piano_roll.height, target_width))  # Accumulation canvas
             }
 
         if fractal_level < self.num_fractal_levels - 2:
@@ -176,7 +239,8 @@ class PianoRollFractalGen(nn.Module):
                     fractal_level=fractal_level + 1,
                     return_intermediates=return_intermediates,
                     _intermediates_list=_intermediates_list,
-                    _patch_pos=patch_pos  # Pass position down
+                    _patch_pos=patch_pos,  # Pass position down
+                    target_width=None  # Only Level 0 uses target_width
                 )
                 return result
         else:
@@ -210,7 +274,8 @@ class PianoRollFractalGen(nn.Module):
             temperature, filter_threshold, next_level_sample_function, visualize,
             _intermediates_list=_intermediates_list if return_intermediates else None,
             _current_level=fractal_level,  # Always pass level for correct shape calculation
-            _patch_pos=_patch_pos
+            _patch_pos=_patch_pos,
+            target_width=target_width if fractal_level == 0 else None  # Only Level 0 uses target_width
         )
         
         # Return with intermediates at top level
@@ -226,21 +291,45 @@ class PianoRollFractalGen(nn.Module):
 
 def fractalmar_piano(**kwargs):
     """
-    FractalGen model for piano roll generation (single configuration).
-    Four-level hierarchy: 128 → 16 → 4 → 1.
+    FractalGen model for piano roll generation with configurable architecture.
+    Default: Four-level hierarchy 128 → 16 → 4 → 1 with (512, 256, 128, 64) embedding dims.
+    
+    Args:
+        img_size_list: Tuple of image sizes for each level (default: (128, 16, 4, 1))
+        embed_dim_list: Tuple of embedding dimensions for each level (default: (512, 256, 128, 64))
+        num_blocks_list: Tuple of transformer blocks for each level (default: (12, 3, 2, 1))
+        num_heads_list: Tuple of attention heads for each level (default: (8, 4, 2, 2))
+        generator_type_list: Tuple of generator types ('mar' or 'ar') for each level
+        **kwargs: Additional arguments passed to PianoRollFractalGen
     """
+    # Extract architecture parameters with defaults
+    img_size_list = kwargs.pop("img_size_list", (128, 16, 4, 1))
+    embed_dim_list = kwargs.pop("embed_dim_list", (512, 256, 128, 64))
+    num_blocks_list = kwargs.pop("num_blocks_list", (12, 3, 2, 1))
+    num_heads_list = kwargs.pop("num_heads_list", (8, 4, 2, 2))
     generator_type_list = kwargs.pop("generator_type_list", ("mar", "mar", "mar", "mar"))
+    
+    # Validation
     if len(generator_type_list) != 4:
         raise ValueError("generator_type_list must contain exactly 4 entries")
     for idx, g in enumerate(generator_type_list):
         if g not in {"mar", "ar"}:
             raise ValueError(f"generator_type_list[{idx}] must be 'mar' or 'ar', got '{g}'")
+    
+    if len(img_size_list) != 4:
+        raise ValueError("img_size_list must contain exactly 4 entries")
+    if len(embed_dim_list) != 4:
+        raise ValueError("embed_dim_list must contain exactly 4 entries")
+    if len(num_blocks_list) != 4:
+        raise ValueError("num_blocks_list must contain exactly 4 entries")
+    if len(num_heads_list) != 4:
+        raise ValueError("num_heads_list must contain exactly 4 entries")
 
     return PianoRollFractalGen(
-        img_size_list=(128, 16, 4, 1),
-        embed_dim_list=(512, 256, 128, 64),
-        num_blocks_list=(12, 3, 2, 1),
-        num_heads_list=(8, 4, 2, 2),
+        img_size_list=img_size_list,
+        embed_dim_list=embed_dim_list,
+        num_blocks_list=num_blocks_list,
+        num_heads_list=num_heads_list,
         generator_type_list=generator_type_list,
         fractal_level=0,
         **kwargs
