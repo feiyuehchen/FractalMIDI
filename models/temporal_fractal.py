@@ -65,19 +65,43 @@ class TimePositionalEmbedding(nn.Module):
 class FractalInputProj(nn.Module):
     """
     Project Piano Roll (B, 2, T, 128) -> (B, T, E).
-    Uses Linear projection on Pitch dimension (flattened) to capture global pitch relationships.
+    Uses an intermediate Pitch Embedding Layer to capture harmonic relationships.
     """
     def __init__(self, in_channels, embed_dim):
         super().__init__()
-        # Input: (B, 2, T, 128) -> Flatten to (B, T, 2*128)
-        self.proj = nn.Linear(in_channels * 128, embed_dim)
+        # Input: (B, 2, T, 128). Flattened to (B, T, 256) usually.
+        # Improved: Project 128 Pitch dim first?
+        # Critique Suggestion: Pitch Embedding Layer.
+        # "Don't just throw 128 pitches into Conv1d."
+        # "Use a shared weight Linear or small Conv1d on Pitch axis."
+        
+        # Approach:
+        # 1. Treat (2, 128) as features per time step.
+        # 2. Flatten to (B, T, 256).
+        # 3. Dense projection to higher dim (e.g. 512) to allow "wiggle room".
+        # 4. Then mix.
+        
+        # Let's implement the "Pitch Embedding" idea more explicitly.
+        # We process the (2, 128) block at each timestep.
+        # Let's use a Linear layer that maps (2*128) -> embed_dim.
+        # But add a hidden layer to capture interactions?
+        # Critique says: "at least add a Dense layer... to project to higher dim"
+        
+        self.pitch_mlp = nn.Sequential(
+            nn.Linear(in_channels * 128, embed_dim * 2),
+            nn.GELU(),
+            nn.Linear(embed_dim * 2, embed_dim)
+        )
+        
         self.pos_emb = TimePositionalEmbedding(embed_dim)
 
     def forward(self, x):
         # x: (B, 2, T, 128)
         B, C, T, P = x.shape
-        x = x.permute(0, 2, 1, 3).reshape(B, T, C * P) # (B, T, 2*128)
-        x = self.proj(x) # (B, T, E)
+        # Permute to (B, T, C*P) -> (B, T, 256)
+        x = x.permute(0, 2, 1, 3).reshape(B, T, C * P) 
+        
+        x = self.pitch_mlp(x) # (B, T, E)
         x = x + self.pos_emb(x)
         return x
 
@@ -130,13 +154,22 @@ class StructureOutputProj(nn.Module):
 class FractalBlock(nn.Module):
     """
     Transformer Block with Time Attention and AdaLN.
+    Modified to use AdaLN for Tempo/Structure conditioning.
     """
     def __init__(self, embed_dim, num_heads, mlp_ratio=4.0, dropout=0.0, cond_dim=None):
         super().__init__()
-        self.norm1 = nn.LayerNorm(embed_dim) if cond_dim is None else AdaLN(embed_dim, cond_dim)
+        # Always use AdaLN if cond_dim is provided
+        self.use_adaln = cond_dim is not None
+        
+        if self.use_adaln:
+            self.norm1 = AdaLN(embed_dim, cond_dim)
+            self.norm2 = AdaLN(embed_dim, cond_dim)
+        else:
+            self.norm1 = nn.LayerNorm(embed_dim)
+            self.norm2 = nn.LayerNorm(embed_dim)
+            
         self.attn = Attention(embed_dim, num_heads=num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout)
         
-        self.norm2 = nn.LayerNorm(embed_dim) if cond_dim is None else AdaLN(embed_dim, cond_dim)
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim, int(embed_dim * mlp_ratio)),
             nn.GELU(),
@@ -148,19 +181,27 @@ class FractalBlock(nn.Module):
 
     def forward(self, x, cond=None):
         # x: (B, T, E)
-        if self.cond_dim is not None:
-            residual = x
+        # cond: (B, T, C) or (B, C) - Conditioning signal (Tempo/Structure)
+        
+        residual = x
+        
+        if self.use_adaln:
             x = self.norm1(x, cond)
-            x = self.attn(x)
-            x = residual + x
-            
-            residual = x
-            x = self.norm2(x, cond)
-            x = self.mlp(x)
-            x = residual + x
         else:
-            x = x + self.attn(self.norm1(x))
-            x = x + self.mlp(self.norm2(x))
+            x = self.norm1(x)
+            
+        x = self.attn(x)
+        x = residual + x
+        
+        residual = x
+        
+        if self.use_adaln:
+            x = self.norm2(x, cond)
+        else:
+            x = self.norm2(x)
+            
+        x = self.mlp(x)
+        x = residual + x
             
         return x
 
@@ -270,7 +311,7 @@ class FractalLoss(nn.Module):
             loss_vel = (loss_vel * vel_mask).sum() / (vel_mask.sum() + 1e-6)
             
             # Weighting: Note loss is harder (sparse), so weight it up
-            return 5.0 * loss_note + 1.0 * loss_vel
+            return 10.0 * loss_note + 1.0 * loss_vel
 
 class TemporalFractalNetwork(nn.Module):
     """
@@ -399,11 +440,24 @@ class TemporalFractalNetwork(nn.Module):
             # Prepare GT
             if i == 0: # Structure Level
                 gt = self._downsample_structure(density, tempo, factor) # (B, 2, T_low)
+                # For L0, we condition on nothing (or global_cond)
+                level_cond = global_cond
+                
             else: # Content Level
                 gt = self._downsample_content(notes, factor) # (B, 2, T_low, 128)
+                
+                # CRITICAL FIX:
+                # Pass Tempo/Structure as side-condition via AdaLN, NOT as input channel.
+                # We need the Structure info for this level.
+                # We have 'prev_level_emb' which is the embedding of L0 (Structure).
+                # This contains the Structure info!
+                # In previous iteration we used `cond_projs` to project `prev_level_emb` to `cond_emb`.
+                # That `cond_emb` IS the Structure condition.
+                # So we just pass that as `cond`.
+                level_cond = None # Will be set via cond_emb logic below
             
             B = gt.shape[0]
-            T = gt.shape[2] # Time dim is 2 for both (B, 2, T) and (B, 2, T, 128)
+            T = gt.shape[2] 
             
             # Random mask ratio [0.5, 1.0]
             mask_ratio = torch.rand(1, device=notes.device).item() * 0.5 + 0.5
@@ -413,10 +467,15 @@ class TemporalFractalNetwork(nn.Module):
             cond_emb = None
             if i > 0 and prev_level_emb is not None:
                 upsampled = self._upsample_embedding(prev_level_emb, T) 
-                cond_emb = self.cond_projs[i](upsampled)
-            
+                cond_emb = self.cond_projs[i](upsampled) # (B, T, E_curr)
+                level_cond = cond_emb # Use structure embedding as condition
+            elif i == 0:
+                # Level 0 has no previous level, use global_cond if available
+                level_cond = global_cond
+
             # Forward
-            logits, x_emb = level_mod(gt, global_cond, mask, cond_emb)
+            # Note: we pass 'level_cond' as the 'cond' argument to TemporalGenerator
+            logits, x_emb = level_mod(gt, level_cond, mask, None)
             
             # Store for next level
             prev_level_emb = x_emb
@@ -569,12 +628,16 @@ class TemporalFractalNetwork(nn.Module):
 
                 # Conditioning
                 cond_emb = None
+                level_cond = None
                 if i > 0 and prev_level_emb is not None:
                     upsampled = self._upsample_embedding(prev_level_emb, current_len)
                     cond_emb = self.cond_projs[i](upsampled)
+                    level_cond = cond_emb
+                elif i == 0:
+                    level_cond = global_cond
                 
                 # Forward
-                logits, x_emb = level_mod(current_canvas, global_cond, mask, cond_emb)
+                logits, x_emb = level_mod(current_canvas, level_cond, mask, None)
                 
                 # Sample
                 if i == 0:
@@ -612,11 +675,15 @@ class TemporalFractalNetwork(nn.Module):
             # Get embedding with NO mask
             mask = torch.zeros(batch_size, current_len, dtype=torch.bool, device=device)
             cond_emb = None
+            level_cond = None
             if i > 0 and prev_level_emb is not None:
                 upsampled = self._upsample_embedding(prev_level_emb, current_len)
                 cond_emb = self.cond_projs[i](upsampled)
+                level_cond = cond_emb
+            elif i == 0:
+                level_cond = global_cond
             
-            _, x_emb = level_mod(current_canvas, global_cond, mask, cond_emb)
+            _, x_emb = level_mod(current_canvas, level_cond, mask, None)
             prev_level_emb = x_emb
             
             if i > 0: # Only return content as final output
