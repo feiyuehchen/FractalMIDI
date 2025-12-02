@@ -1,33 +1,24 @@
 """
-Inference script for FractalGen MIDI model.
+Inference script for FractalGen MIDI model (Temporal Fractal Network).
 Supports unconditional generation, conditional generation, and inpainting.
 
 Usage:
     # Using config file
     python inference.py --config config/inference_default.yaml --checkpoint path/to/model.ckpt
     
-    # Unconditional generation (legacy)
+    # Unconditional generation
     python inference.py --checkpoint path/to/model.ckpt --mode unconditional --output_dir outputs/samples
-
-    # Conditional generation (prefix-based)
-    python inference.py --checkpoint path/to/model.ckpt --mode conditional \\
-        --condition_midi input.mid --generation_length 512 --output_dir outputs/conditional
-
-    # Inpainting
-    python inference.py --checkpoint path/to/model.ckpt --mode inpainting \\
-        --input_midi input.mid --mask_start 64 --mask_end 192 --output_dir outputs/inpainting
 """
 
 import argparse
 from pathlib import Path
 import torch
 import symusic
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import yaml
 
 from trainer import FractalMIDILightningModule
-from model import fractalmar_piano
 from visualizer import piano_roll_to_image
 
 
@@ -39,16 +30,13 @@ def load_config(config_path):
 
 
 def merge_config_with_args(config, args):
-    """Merge YAML config with command line arguments.
-    
-    Command line arguments take precedence over config file values.
-    """
+    """Merge YAML config with command line arguments."""
     if config is None:
         return args
     
     merged = argparse.Namespace()
     
-    # Checkpoint (required)
+    # Checkpoint
     merged.checkpoint = args.checkpoint if args.checkpoint else config.get('checkpoint')
     
     # Mode
@@ -57,32 +45,9 @@ def merge_config_with_args(config, args):
     
     # Unconditional settings
     unconditional_cfg = config.get('unconditional', {})
-    merged.num_samples = args.num_samples if args.num_samples != 4 else unconditional_cfg.get('num_samples', 10)
-    merged.generation_length = args.generation_length if args.generation_length != 512 else unconditional_cfg.get('length', 512)
-    merged.target_width = args.target_width if args.target_width != 512 else unconditional_cfg.get('length', 512)
+    merged.num_samples = args.num_samples if args.num_samples != 4 else unconditional_cfg.get('num_samples', 4)
+    merged.generation_length = args.generation_length if args.generation_length != 256 else unconditional_cfg.get('length', 256)
     merged.temperature = args.temperature if args.temperature != 1.0 else unconditional_cfg.get('temperature', 1.0)
-    
-    # Get sparsity_bias and velocity_threshold from config based on mode
-    mode_cfg = config.get(merged.mode, {})
-    merged.sparsity_bias = args.sparsity_bias if args.sparsity_bias != 0.0 else mode_cfg.get('sparsity_bias', 0.0)
-    merged.velocity_threshold = args.velocity_threshold if args.velocity_threshold != 0.10 else mode_cfg.get('velocity_threshold', 0.10)
-    
-    # Conditional settings
-    conditional_cfg = config.get('conditional', {})
-    merged.condition_midi = args.condition_midi if args.condition_midi else conditional_cfg.get('condition_midi')
-    merged.condition_length = args.condition_length if args.condition_length != 64 else 64
-    
-    # Inpainting settings
-    inpainting_cfg = config.get('inpainting', {})
-    merged.input_midi = args.input_midi if args.input_midi else inpainting_cfg.get('input_midi')
-    merged.mask_start = args.mask_start if args.mask_start != 64 else inpainting_cfg.get('mask_start', 64)
-    merged.mask_end = args.mask_end if args.mask_end != 192 else inpainting_cfg.get('mask_end', 192)
-    
-    # Sampling parameters
-    merged.num_iter_list = args.num_iter_list if args.num_iter_list != [12, 8, 4, 1] else [12, 8, 4, 1]
-    merged.cfg = args.cfg
-    merged.sparsity_bias = args.sparsity_bias
-    merged.velocity_threshold = args.velocity_threshold
     
     # Output
     output_cfg = config.get('output', {})
@@ -95,185 +60,173 @@ def merge_config_with_args(config, args):
     return merged
 
 
-def create_generation_gif(intermediates, output_path, fps=2):
+def create_generation_gif(intermediates, output_path, fps=15):
     """
     Create a GIF from intermediate generation steps.
-    
-    Args:
-        intermediates: List of dicts with 'output', 'level', 'iteration', 'level_name' keys
-        output_path: Path to save GIF
-        fps: Frames per second
     """
-    import imageio
-    from PIL import Image, ImageDraw, ImageFont
-    
-    frames = []
-    
-    for frame_data in intermediates:
-        # Extract piano roll (B, C, H, W)
-        piano_roll = frame_data['output'][0, 0]  # (128, W)
+    try:
+        from visualizer import create_growth_animation
         
-        # Convert to image
-        img = piano_roll_to_image(
-            piano_roll,
-            apply_colormap=True,
-            return_pil=True
+        sample_frames = []
+        for item in intermediates:
+            frame = item['output'] # (B, 3, T, 128) or (3, T, 128)
+            if frame.ndim == 4: frame = frame[0]
+            sample_frames.append(frame)
+            
+        create_growth_animation(
+            sample_frames,
+            save_path=output_path,
+            fps=fps,
+            transition_duration=0.1,
+            pop_effect=True
         )
-        
-        # Add text annotation
-        draw = ImageDraw.Draw(img)
-        text = frame_data.get('level_name', f"Level {frame_data['level']}, Iter {frame_data['iteration']}")
-        
-        # Try to use a better font, fallback to default
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-        except:
-            font = ImageFont.load_default()
-        
-        # Draw text with background
-        bbox = draw.textbbox((10, 10), text, font=font)
-        draw.rectangle([(bbox[0]-5, bbox[1]-5), (bbox[2]+5, bbox[3]+5)], fill='black')
-        draw.text((10, 10), text, fill='white', font=font)
-        
-        frames.append(np.array(img))
-    
-    # Save as GIF
-    imageio.mimsave(
-        output_path,
-        frames,
-        fps=fps,
-        loop=0  # Infinite loop
-    )
+    except ImportError:
+        print("Could not import create_growth_animation from visualizer")
+    except Exception as e:
+        print(f"Error creating GIF: {e}")
 
 
-def piano_roll_to_midi(piano_roll, ticks_per_16th=120, velocity_threshold=0.10):
+def piano_roll_to_midi(piano_roll, tempo_curve=None, ticks_per_16th=120, velocity_threshold=0.10):
     """
-    Convert piano roll (H x W) to MIDI file.
+    Convert piano roll to MIDI file.
     
     Args:
-        piano_roll: (128, T) numpy array with values in [0, 1]
+        piano_roll: (C, T, 128) numpy array. C=2 or C=3.
+        tempo_curve: Optional (T,) array of normalized tempo if C=2.
         ticks_per_16th: Ticks per 16th note
-        velocity_threshold: Minimum velocity to create a note
+        velocity_threshold: Minimum note activation to create a note
     
     Returns:
         symusic.Score object
     """
     score = symusic.Score()
-    score.ticks_per_quarter = ticks_per_16th * 4  # 4 * 16th = quarter
+    score.ticks_per_quarter = ticks_per_16th * 4
     
     # Create a piano track
     track = symusic.Track()
-    track.name = "Piano"
+    track.name = "FractalPiano"
+    track.program = 0 # Acoustic Grand Piano
     track.is_drum = False
     
-    # Convert piano roll to notes
-    H, W = piano_roll.shape  # (128, T)
+    # Unpack channels
+    C, T, H = piano_roll.shape
     
+    note_layer = piano_roll[0] # (T, 128)
+    vel_layer = piano_roll[1]  # (T, 128)
+    
+    if C >= 3:
+        tempo_layer = piano_roll[2] # (T, 128)
+        tempo_curve_arr = tempo_layer.mean(axis=1)
+    elif tempo_curve is not None:
+        tempo_curve_arr = tempo_curve
+    else:
+        tempo_curve_arr = np.ones(T) * 0.5 # Default 120 BPM (normalized)
+    
+    # 1. Extract Notes
     for pitch in range(H):
         is_note_on = False
         note_start = 0
+        current_vel_sum = 0.0
+        current_vel_count = 0
         
-        for t in range(W):
-            velocity_norm = piano_roll[pitch, t]
+        for t in range(T):
+            activation = note_layer[t, pitch]
+            velocity = vel_layer[t, pitch]
             
-            if velocity_norm > velocity_threshold:
+            if activation > 0.5: # Binary threshold
                 if not is_note_on:
-                    # Note on
+                    # Note On
                     is_note_on = True
                     note_start = t
+                    current_vel_sum = velocity
+                    current_vel_count = 1
+                else:
+                    # Accumulate velocity for average
+                    current_vel_sum += velocity
+                    current_vel_count += 1
             else:
                 if is_note_on:
-                    # Note off - create note
+                    # Note Off
                     is_note_on = False
-                    note_duration = t - note_start
-                    if note_duration > 0:
-                        # Calculate average velocity during note
-                        avg_velocity = piano_roll[pitch, note_start:t].mean()
-                        velocity_int = int(avg_velocity * 127)
-                        velocity_int = max(1, min(127, velocity_int))
-                        
+                    duration = t - note_start
+                    avg_vel = current_vel_sum / max(1, current_vel_count)
+                    
+                    if avg_vel > velocity_threshold:
+                        vel_int = int(np.clip(avg_vel * 127, 1, 127))
                         note = symusic.Note(
                             time=note_start * ticks_per_16th,
-                            duration=note_duration * ticks_per_16th,
+                            duration=duration * ticks_per_16th,
                             pitch=pitch,
-                            velocity=velocity_int
+                            velocity=vel_int
                         )
                         track.notes.append(note)
         
-        # Handle note that extends to the end
+        # End active note
         if is_note_on:
-            note_duration = W - note_start
-            if note_duration > 0:
-                avg_velocity = piano_roll[pitch, note_start:W].mean()
-                velocity_int = int(avg_velocity * 127)
-                velocity_int = max(1, min(127, velocity_int))
-                
+            duration = T - note_start
+            avg_vel = current_vel_sum / max(1, current_vel_count)
+            if avg_vel > velocity_threshold:
+                vel_int = int(np.clip(avg_vel * 127, 1, 127))
                 note = symusic.Note(
                     time=note_start * ticks_per_16th,
-                    duration=note_duration * ticks_per_16th,
+                    duration=duration * ticks_per_16th,
                     pitch=pitch,
-                    velocity=velocity_int
+                    velocity=vel_int
                 )
                 track.notes.append(note)
     
     score.tracks.append(track)
+    
+    # 2. Extract Tempo
+    # Convert normalized tempo back to BPM
+    # Norm = (BPM - 40) / 160
+    # BPM = Norm * 160 + 40
+    bpm_curve = tempo_curve_arr * 160.0 + 40.0
+    
+    # Filter tempo events (only write if significant change)
+    last_bpm = -1.0
+    for t in range(T):
+        current_bpm = bpm_curve[t]
+        # Only write if change > 2 BPM
+        if abs(current_bpm - last_bpm) > 2.0:
+            score.tempos.append(symusic.Tempo(
+                time=t * ticks_per_16th,
+                qpm=float(current_bpm)
+            ))
+            last_bpm = current_bpm
+            
+    if not score.tempos:
+        score.tempos.append(symusic.Tempo(time=0, qpm=120.0))
+        
     return score
 
-
-def midi_to_piano_roll(midi_path, ticks_per_16th=120, target_length=None):
-    """
-    Load MIDI file and convert to piano roll.
-    
-    Args:
-        midi_path: Path to MIDI file
-        ticks_per_16th: Ticks per 16th note
-        target_length: If specified, crop/pad to this length
-    
-    Returns:
-        (128, T) numpy array
-    """
-    score = symusic.Score(midi_path)
-    
-    # Calculate total length in 16th notes
-    total_ticks = max(
-        note.end
-        for track in score.tracks
-        for note in track.notes
-    ) if any(track.notes for track in score.tracks) else ticks_per_16th * 16
-    
-    length = (total_ticks + ticks_per_16th - 1) // ticks_per_16th
-    
-    if target_length is not None:
-        length = target_length
-    
-    # Initialize piano roll
-    piano_roll = np.zeros((128, length), dtype=np.float32)
-    
-    # Fill in notes
-    for track in score.tracks:
-        if track.is_drum:
-            continue
+def midi_to_tensor(midi_path, target_length=256):
+    """Load MIDI and convert to tensor for inpainting."""
+    try:
+        score = symusic.Score(midi_path)
+        score = score.resample(120, min_dur=1) # 120 ticks per 16th
         
-        for note in track.notes:
-            start_16th = note.time // ticks_per_16th
-            end_16th = note.end // ticks_per_16th
-            
-            if start_16th >= length:
-                continue
-            
-            # Ensure minimum duration of 1 time step
-            if end_16th <= start_16th:
-                end_16th = start_16th + 1
-            
-            end_16th = min(end_16th, length)
-            
-            velocity_norm = note.velocity / 127.0
-            piano_roll[note.pitch, start_16th:end_16th] = max(
-                piano_roll[note.pitch, start_16th:end_16th].max(),
-                velocity_norm
-            )
-    
-    return piano_roll
+        duration_steps = target_length
+        note_layer = np.zeros((duration_steps, 128), dtype=np.float32)
+        vel_layer = np.zeros((duration_steps, 128), dtype=np.float32)
+        
+        for track in score.tracks:
+            for note in track.notes:
+                pitch = note.pitch
+                velocity = note.velocity / 127.0
+                start_step = note.time // 120
+                note_duration_steps = max(1, note.duration // 120)
+                end_step = min(start_step + note_duration_steps, duration_steps)
+                
+                if 0 <= pitch < 128 and start_step < duration_steps:
+                    note_layer[start_step:end_step, pitch] = 1.0
+                    vel_layer[start_step:end_step, pitch] = np.maximum(vel_layer[start_step:end_step, pitch], velocity)
+        
+        notes = np.stack([note_layer, vel_layer], axis=0)
+        return torch.from_numpy(notes) # (2, T, 128)
+    except Exception as e:
+        print(f"Error loading MIDI {midi_path}: {e}")
+        return None
 
 
 def parse_args():
@@ -290,44 +243,18 @@ def parse_args():
     
     # Generation mode
     parser.add_argument('--mode', type=str, default='unconditional',
-                       choices=['unconditional', 'conditional', 'inpainting'],
+                       choices=['unconditional'], # Only supporting unconditional for v2 first pass
                        help='Generation mode')
     parser.add_argument('--save_gif', action='store_true',
                        help='Save generation process as GIF for the first sample')
     
     # Unconditional generation
     parser.add_argument('--num_samples', type=int, default=4,
-                       help='Number of samples to generate (unconditional mode)')
+                       help='Number of samples to generate')
     parser.add_argument('--generation_length', type=int, default=256,
-                       help='Length of generated sequence (in 16th notes, default 512 for 128x512)')
-    parser.add_argument('--target_width', type=int, default=256,
-                       help='Target width for generation (128, 256, 512, etc.). Default: 512 (for 128x512), 256 (for 128x256), 128 (for 128x128)')
-    
-    # Conditional generation
-    parser.add_argument('--condition_midi', type=str,
-                       help='Condition MIDI file (for conditional mode)')
-    parser.add_argument('--condition_length', type=int, default=64,
-                       help='Length of conditioning (in 16th notes)')
-    
-    # Inpainting
-    parser.add_argument('--input_midi', type=str,
-                       help='Input MIDI file (for inpainting mode)')
-    parser.add_argument('--mask_start', type=int, default=64,
-                       help='Start of mask region (in 16th notes)')
-    parser.add_argument('--mask_end', type=int, default=192,
-                       help='End of mask region (in 16th notes)')
-    
-    # Sampling parameters
-    parser.add_argument('--num_iter_list', type=int, nargs='+', default=[12, 8, 4, 1],
-                       help='Number of iterations per level (4 levels: 128→16→4→1)')
-    parser.add_argument('--cfg', type=float, default=1.0,
-                       help='Classifier-free guidance strength')
+                       help='Length of generated sequence (in 16th notes)')
     parser.add_argument('--temperature', type=float, default=1.0,
                        help='Sampling temperature')
-    parser.add_argument('--sparsity_bias', type=float, default=0.0,
-                       help='Bias to encourage sparsity (higher = sparser, 0 = no bias)')
-    parser.add_argument('--velocity_threshold', type=float, default=0.05,
-                       help='Minimum velocity to create a note (0-1)')
     
     # Output
     parser.add_argument('-o', '--output_dir', type=str, default='outputs/inference',
@@ -336,7 +263,7 @@ def parse_args():
                        help='Save piano roll images')
     
     # Hardware
-    parser.add_argument('--device', type=str, default='cuda:2',
+    parser.add_argument('--device', type=str, default='cuda:0',
                        help='Device to use')
     
     return parser.parse_args()
@@ -367,7 +294,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\n{'='*70}")
-    print(f"FractalGen MIDI Inference")
+    print(f"FractalGen MIDI Inference (Temporal Fractal Network)")
     print(f"{'='*70}")
     print(f"Mode: {args.mode}")
     print(f"Checkpoint: {args.checkpoint}")
@@ -383,11 +310,8 @@ def main():
         model = FractalMIDILightningModule.load_from_checkpoint(args.checkpoint)
         print(f"✓ Loaded from checkpoint: {args.checkpoint}")
     else:
-        # Create new model (for testing)
-        print(f"⚠️  Checkpoint not found, creating new model")
-        from trainer import FractalTrainerConfig
-        config = FractalTrainerConfig()
-        model = FractalMIDILightningModule(config)
+        print(f"Error: Checkpoint not found at {args.checkpoint}")
+        return
     
     model = model.to(device)
     model.eval()
@@ -403,178 +327,158 @@ def main():
         for i in range(args.num_samples):
             print(f"\nGenerating sample {i+1}/{args.num_samples}...")
             
-            # Enable intermediate recording for first sample if GIF requested
             return_intermediates = (i == 0 and args.save_gif)
             
             with torch.no_grad():
-                # Generate using model's sample method
                 result = model.model.sample(
                     batch_size=1,
-                    cond_list=None,
-                    num_iter_list=args.num_iter_list,
-                    cfg=args.cfg,
-                    cfg_schedule='constant',
+                    length=args.generation_length,
+                    global_cond=None,
+                    cfg=1.0,
                     temperature=args.temperature,
-                    filter_threshold=0.0,
-                    fractal_level=0,
-                    target_width=args.target_width,
+                    num_iter_list=[8, 4, 2],
                     return_intermediates=return_intermediates
                 )
             
-            # Extract tensor and intermediates
             intermediates = None
             if isinstance(result, tuple):
                 generated, intermediates = result
             else:
                 generated = result
             
-            # Apply sparsity bias if specified (default is 0 = no bias, same as training)
-            if args.sparsity_bias != 0.0:
-                generated = generated - args.sparsity_bias
-                if args.sparsity_bias < 1.0:
-                    generated = generated / (1.0 - args.sparsity_bias)
-                generated = torch.clamp(generated, min=0.0, max=1.0)
+            piano_roll = generated[0].cpu().numpy()  # (2, T, 128)
             
-            # Convert to piano roll
-            piano_roll = generated[0, 0].cpu().numpy()  # (128, T)
-            
-            # Trim to desired length
-            piano_roll = piano_roll[:, :args.generation_length]
+            # Extract tempo from intermediates if available
+            tempo_curve = None
+            if intermediates:
+                # Find last structure output
+                for item in reversed(intermediates):
+                    if item.get('is_structure', False):
+                        struct = item['output'] # (B, 2, T_low)
+                        tempo_low = struct[0, 1]
+                        # Upsample
+                        tempo_curve = np.interp(
+                            np.linspace(0, len(tempo_low), args.generation_length),
+                            np.arange(len(tempo_low)),
+                            tempo_low.numpy()
+                        )
+                        break
             
             # Save MIDI
             midi_path = output_dir / f'unconditional_{i:03d}.mid'
-            score = piano_roll_to_midi(piano_roll, velocity_threshold=args.velocity_threshold)
+            score = piano_roll_to_midi(piano_roll, tempo_curve=tempo_curve, velocity_threshold=0.1)
             score.dump_midi(str(midi_path))
             print(f"✓ Saved MIDI: {midi_path}")
             
-            # Always save image (like training does)
-            img_path = output_dir / f'unconditional_{i:03d}.png'
-            # Use the same visualization as training
+            # Save image (visualizer expects 3 channels)
+            if args.save_images:
+                img_path = output_dir / f'unconditional_{i:03d}.png'
+                if tempo_curve is None:
+                    tempo_curve = np.ones(piano_roll.shape[1]) * 0.5
+                
+                # Reconstruct 3-channel roll for visualization
+                tempo_ch = np.tile(tempo_curve[:, None], (1, 128)).T # (128, T) -> (T, 128)
+                vis_roll = np.concatenate([piano_roll, tempo_ch[None, :, :]], axis=0) # (3, T, 128)
+                
+                img_pil = piano_roll_to_image(
+                    torch.from_numpy(vis_roll),
+                    apply_colormap=True,
+                    return_pil=True,
+                    composite_tempo=True
+                )
+                img_pil.save(str(img_path))
+                print(f"✓ Saved image: {img_path}")
+            
+            if intermediates is not None and len(intermediates) > 0:
+                # Filter frames for GIF (only content)
+                # And add tempo channel
+                content_intermediates = []
+                for item in intermediates:
+                    if not item.get('is_structure', False):
+                        frame = item['output'][0] # (2, T, 128)
+                        # Add tempo
+                        T_frame = frame.shape[1]
+                        tempo_frm = torch.ones(1, T_frame, 128) * 0.5
+                        full_frame = torch.cat([frame, tempo_frm], dim=0)
+                        content_intermediates.append({'output': full_frame.unsqueeze(0)})
+                
+                print(f"\nCreating generation process GIF...")
+                gif_path = output_dir / f'unconditional_{i:03d}_process.gif'
+                create_generation_gif(content_intermediates, str(gif_path), fps=15)
+                print(f"✓ Saved GIF: {gif_path}")
+
+    elif args.mode == 'inpainting':
+        if not args.input_midi:
+            raise ValueError("--input_midi is required for inpainting mode")
+        
+        print(f"Loading input MIDI: {args.input_midi}")
+        initial_content = midi_to_tensor(args.input_midi, target_length=args.generation_length)
+        if initial_content is None:
+            raise ValueError("Failed to load input MIDI")
+        
+        initial_content = initial_content.unsqueeze(0).to(device) # (1, 2, T, 128)
+        
+        # Parse mask
+        # Default: Mask nothing (reconstruction)? No, that does nothing.
+        # If no mask provided, mask second half?
+        inpaint_mask = torch.zeros(1, args.generation_length, device=device)
+        if args.mask_ranges:
+            ranges = args.mask_ranges.split(',')
+            for r in ranges:
+                start, end = map(int, r.split('-'))
+                inpaint_mask[:, start:end] = 1.0
+            print(f"Masking ranges: {args.mask_ranges}")
+        else:
+            print("No mask provided. Masking last 50% by default.")
+            inpaint_mask[:, args.generation_length//2:] = 1.0
+            
+        print(f"\nInpainting...")
+        
+        with torch.no_grad():
+            result = model.model.sample(
+                batch_size=1,
+                length=args.generation_length,
+                global_cond=None,
+                cfg=1.0,
+                temperature=args.temperature,
+                num_iter_list=[8, 4, 2],
+                initial_content=initial_content,
+                inpaint_mask=inpaint_mask,
+                return_intermediates=args.save_gif
+            )
+            
+        intermediates = None
+        if isinstance(result, tuple):
+            generated, intermediates = result
+        else:
+            generated = result
+            
+        piano_roll = generated[0].cpu().numpy()
+        
+        # Save MIDI
+        midi_path = output_dir / f'inpainting_result.mid'
+        score = piano_roll_to_midi(piano_roll, velocity_threshold=0.1)
+        score.dump_midi(str(midi_path))
+        print(f"✓ Saved MIDI: {midi_path}")
+        
+        # Save Image
+        if args.save_images:
+            img_path = output_dir / f'inpainting_result.png'
+            # Add dummy tempo
+            tempo_ch = np.ones((1, args.generation_length, 128)) * 0.5
+            vis_roll = np.concatenate([piano_roll, tempo_ch], axis=0)
+            
             img_pil = piano_roll_to_image(
-                torch.from_numpy(piano_roll),
+                torch.from_numpy(vis_roll),
                 apply_colormap=True,
-                return_pil=True
+                return_pil=True,
+                composite_tempo=True
             )
             img_pil.save(str(img_path))
             print(f"✓ Saved image: {img_path}")
-            
-            # Save GIF if intermediates recorded
-            if intermediates is not None and len(intermediates) > 0:
-                print(f"\nCreating generation process GIF...")
-                gif_path = output_dir / f'unconditional_{i:03d}_process.gif'
-                create_generation_gif(intermediates, gif_path, fps=2)
-                print(f"✓ Saved GIF: {gif_path}")
-                print(f"  Total frames: {len(intermediates)}")
-    
-    elif args.mode == 'conditional':
-        # Conditional generation (prefix-based)
-        if not args.condition_midi:
-            print("Error: --condition_midi is required for conditional mode")
-            return
-        
-        print(f"Loading condition from: {args.condition_midi}")
-        condition_roll = midi_to_piano_roll(
-            args.condition_midi,
-            target_length=args.condition_length
-        )
-        
-        condition_tensor = torch.from_numpy(condition_roll).unsqueeze(0).unsqueeze(0).float().to(device)
-        
-        with torch.no_grad():
-            # Use model's conditional generation
-            from model import conditional_generation
-            generated = conditional_generation(
-                model.model,
-                condition_tensor,
-                args.generation_length,
-                args.num_iter_list,
-                args.cfg,
-                args.temperature,
-                0.0
-            )
-        
-        # Extract tensor
-        if isinstance(generated, tuple):
-            generated = generated[0]
-        
-        # Apply sparsity bias if specified (default is 0 = no bias, same as training)
-        if args.sparsity_bias != 0.0:
-            generated = generated - args.sparsity_bias
-            if args.sparsity_bias < 1.0:
-                generated = generated / (1.0 - args.sparsity_bias)
-            generated = torch.clamp(generated, min=0.0, max=1.0)
-        
-        piano_roll = generated[0, 0].cpu().numpy()
-        
-        # Save MIDI
-        midi_path = output_dir / 'conditional_output.mid'
-        score = piano_roll_to_midi(piano_roll, velocity_threshold=args.velocity_threshold)
-        score.dump_midi(str(midi_path))
-        print(f"✓ Saved MIDI: {midi_path}")
-        
-        # Always save image
-        img_path = output_dir / 'conditional_output.png'
-        img_pil = piano_roll_to_image(
-            torch.from_numpy(piano_roll),
-            apply_colormap=True,
-            return_pil=True
-        )
-        img_pil.save(str(img_path))
-        print(f"✓ Saved image: {img_path}")
-    
-    elif args.mode == 'inpainting':
-        # Inpainting
-        if not args.input_midi:
-            print("Error: --input_midi is required for inpainting mode")
-            return
-        
-        print(f"Loading input from: {args.input_midi}")
-        input_roll = midi_to_piano_roll(args.input_midi)
-        
-        input_tensor = torch.from_numpy(input_roll).unsqueeze(0).unsqueeze(0).float().to(device)
-        
-        with torch.no_grad():
-            # Use model's inpainting
-            from model import inpainting_generation
-            generated = inpainting_generation(
-                model.model,
-                input_tensor,
-                args.mask_start,
-                args.mask_end,
-                args.num_iter_list,
-                args.cfg,
-                args.temperature,
-                0.0
-            )
-        
-        # Extract tensor
-        if isinstance(generated, tuple):
-            generated = generated[0]
-        
-        # Apply sparsity bias if specified (default is 0 = no bias, same as training)
-        if args.sparsity_bias != 0.0:
-            generated = generated - args.sparsity_bias
-            if args.sparsity_bias < 1.0:
-                generated = generated / (1.0 - args.sparsity_bias)
-            generated = torch.clamp(generated, min=0.0, max=1.0)
-        
-        piano_roll = generated[0, 0].cpu().numpy()
-        
-        # Save MIDI
-        midi_path = output_dir / 'inpainting_output.mid'
-        score = piano_roll_to_midi(piano_roll, velocity_threshold=args.velocity_threshold)
-        score.dump_midi(str(midi_path))
-        print(f"✓ Saved MIDI: {midi_path}")
-        
-        # Always save image
-        img_path = output_dir / 'inpainting_output.png'
-        img_pil = piano_roll_to_image(
-            torch.from_numpy(piano_roll),
-            apply_colormap=True,
-            return_pil=True
-        )
-        img_pil.save(str(img_path))
-        print(f"✓ Saved image: {img_path}")
+
+    else:
+        print(f"Mode {args.mode} not implemented.")
     
     print(f"\n{'='*70}")
     print("Generation complete!")
@@ -584,4 +488,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

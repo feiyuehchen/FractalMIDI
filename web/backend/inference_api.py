@@ -171,82 +171,42 @@ class InferenceEngine:
         
         # Run generation in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: model.sample(
-                batch_size=1,
-                cond_list=None,
-                num_iter_list=request.num_iter_list or self.config.model.default_num_iter_list,
-                cfg=request.cfg,
-                temperature=request.temperature,
-                filter_threshold=self.config.model.default_filter_threshold,
-                target_width=request.length,
-                return_intermediates=request.create_gif
-            )
-        )
+        
+        def run_sample():
+            with torch.no_grad():
+                return model.model.sample(
+                    batch_size=1,
+                    length=request.length,
+                    global_cond=None,
+                    cfg=request.cfg,
+                    temperature=request.temperature,
+                    num_iter_list=request.num_iter_list or self.config.model.default_num_iter_list,
+                    return_intermediates=request.create_gif
+                )
+
+        result = await loop.run_in_executor(None, run_sample)
         
         if request.create_gif:
-            piano_roll, intermediates = result
+            # result is (final_output, intermediates)
+            # final_output: (B, 2, T, 128)
+            tensor_out, intermediates = result
         else:
-            piano_roll = result
+            tensor_out = result
             intermediates = None
+        
+        # Convert (B, 2, T, 128) -> (2, T, 128) -> (3, T, 128) with dummy tempo
+        piano_roll = tensor_out[0].cpu().numpy()
+        T = piano_roll.shape[1]
+        tempo_ch = np.ones((1, T, 128), dtype=np.float32) * 0.5
+        piano_roll_3ch = np.concatenate([piano_roll, tempo_ch], axis=0)
         
         self.jobs[job_id]["progress"] = 0.8
         
         return {
-            "piano_roll": piano_roll[0, 0].cpu().numpy(),
+            "piano_roll": piano_roll_3ch,
             "intermediates": intermediates
         }
-    
-    async def _generate_conditional(self, model, request, job_id):
-        """Generate conditionally."""
-        from web.backend.example_manager import ExampleManager
-        
-        if not request.condition_example_id:
-            raise ValueError("condition_example_id required for conditional generation")
-        
-        # Load condition
-        example_manager = ExampleManager(self.config.examples.examples_dir)
-        condition_pr = example_manager.load_example_piano_roll(
-            request.condition_example_id,
-            target_length=request.condition_length
-        )
-        
-        if condition_pr is None:
-            raise ValueError(f"Could not load example: {request.condition_example_id}")
-        
-        self.jobs[job_id]["message"] = "Generating continuation..."
-        self.jobs[job_id]["progress"] = 0.2
-        
-        # Run conditional generation
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: conditional_generation(
-                model=model,
-                condition=torch.from_numpy(condition_pr).unsqueeze(0).unsqueeze(0),
-                target_length=request.length,
-                num_iter_list=request.num_iter_list or self.config.model.default_num_iter_list,
-                cfg=request.cfg,
-                temperature=request.temperature,
-                return_intermediates=request.create_gif
-            )
-        )
-        
-        if request.create_gif:
-            piano_roll, intermediates = result
-        else:
-            piano_roll = result
-            intermediates = None
-        
-        self.jobs[job_id]["progress"] = 0.8
-        
-        return {
-            "piano_roll": piano_roll[0, 0].cpu().numpy(),
-            "intermediates": intermediates,
-            "condition": condition_pr
-        }
-    
+
     async def _generate_inpainting(self, model, request, job_id):
         """Generate with inpainting."""
         from web.backend.example_manager import ExampleManager
@@ -256,51 +216,81 @@ class InferenceEngine:
         
         # Load example
         example_manager = ExampleManager(self.config.examples.examples_dir)
-        piano_roll = example_manager.load_example_piano_roll(
+        piano_roll_np = example_manager.load_example_piano_roll(
             request.inpaint_example_id,
             target_length=request.length
-        )
+        ) # Expected (3, T, 128) or (2, T, 128) or (128, T)
         
-        if piano_roll is None:
+        if piano_roll_np is None:
             raise ValueError(f"Could not load example: {request.inpaint_example_id}")
-        
+            
+        # Adapt shape if needed
+        if piano_roll_np.ndim == 2 and piano_roll_np.shape[0] == 128: # (128, T)
+            # Convert to (2, T, 128)
+            # Assume Velocity = Note
+            T = piano_roll_np.shape[1]
+            note = piano_roll_np.T
+            vel = piano_roll_np.T
+            piano_roll_np = np.stack([note, vel], axis=0) # (2, T, 128)
+        elif piano_roll_np.ndim == 3 and piano_roll_np.shape[0] == 3:
+            # Drop tempo for input
+            piano_roll_np = piano_roll_np[:2]
+            
         # Create mask
-        mask = np.ones_like(piano_roll, dtype=bool)
+        # mask: 1.0 where we want to generate (inpainting mask)
+        mask_np = np.zeros((request.length,), dtype=np.float32)
         if request.inpaint_mask:
             for start, end in request.inpaint_mask:
-                mask[:, start:end] = False
-        
+                s = max(0, min(start, request.length))
+                e = max(0, min(end, request.length))
+                mask_np[s:e] = 1.0
+        else:
+            # Default mask: last 50%?
+            mask_np[request.length//2:] = 1.0
+            
+        # Convert to tensors
+        device = next(model.parameters()).device
+        initial_content = torch.from_numpy(piano_roll_np).unsqueeze(0).to(device) # (1, 2, T, 128)
+        inpaint_mask = torch.from_numpy(mask_np).unsqueeze(0).to(device) # (1, T)
+
         self.jobs[job_id]["message"] = "Inpainting masked regions..."
         self.jobs[job_id]["progress"] = 0.2
         
-        # Run inpainting
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: inpainting_generation(
-                model=model,
-                piano_roll=torch.from_numpy(piano_roll).unsqueeze(0).unsqueeze(0),
-                mask=torch.from_numpy(mask).unsqueeze(0).unsqueeze(0),
-                num_iter_list=request.num_iter_list or self.config.model.default_num_iter_list,
-                cfg=request.cfg,
-                temperature=request.temperature,
-                return_intermediates=request.create_gif
-            )
-        )
+        def run_sample():
+            with torch.no_grad():
+                return model.model.sample(
+                    batch_size=1,
+                    length=request.length,
+                    global_cond=None,
+                    cfg=request.cfg,
+                    temperature=request.temperature,
+                    num_iter_list=request.num_iter_list or self.config.model.default_num_iter_list,
+                    initial_content=initial_content,
+                    inpaint_mask=inpaint_mask,
+                    return_intermediates=request.create_gif
+                )
+
+        result = await loop.run_in_executor(None, run_sample)
         
         if request.create_gif:
-            piano_roll_result, intermediates = result
+            tensor_out, intermediates = result
         else:
-            piano_roll_result = result
+            tensor_out = result
             intermediates = None
+            
+        piano_roll = tensor_out[0].cpu().numpy()
+        T = piano_roll.shape[1]
+        tempo_ch = np.ones((1, T, 128), dtype=np.float32) * 0.5
+        piano_roll_3ch = np.concatenate([piano_roll, tempo_ch], axis=0)
         
         self.jobs[job_id]["progress"] = 0.8
         
         return {
-            "piano_roll": piano_roll_result[0, 0].cpu().numpy(),
+            "piano_roll": piano_roll_3ch,
             "intermediates": intermediates,
-            "original": piano_roll,
-            "mask": mask
+            "original": piano_roll_np,
+            "mask": mask_np
         }
     
     async def _save_outputs(self, job_id: str, result: Dict, request) -> Dict:

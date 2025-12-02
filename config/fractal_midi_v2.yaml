@@ -1,0 +1,42 @@
+# FractalMIDI 2.0 Configuration
+# Architecture: Tempo-Aware Temporal Fractal Network (TFN)
+
+# Training Hyperparameters
+max_steps: 200000
+grad_clip: 3.0
+accumulate_grad_batches: 1
+precision: "32"
+log_every_n_steps: 50
+val_check_interval_steps: 2000
+checkpoint_every_n_steps: 2000
+save_top_k: 3
+
+# Visualization
+log_images_every_n_steps: 5000
+num_images_to_log: 4
+
+# Optimizer
+optimizer:
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.05
+
+# Scheduler
+scheduler:
+  schedule_type: "cosine"
+  warmup_steps: 2000
+  min_lr: 1.0e-6
+
+# Model Architecture
+model:
+  # TFN Specifics
+  input_channels: 2
+  embed_dims: [512, 256, 128]
+  num_heads: [8, 4, 2]
+  num_blocks: [6, 4, 2]
+  cond_dim: 0
+  
+  # Legacy params (required by strict type checking if passed, ignored by model)
+  img_size_list: [128, 16, 4, 1]
+  generator_type_list: ["mar", "mar", "mar", "mar"]
+
