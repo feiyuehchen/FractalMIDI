@@ -1,0 +1,170 @@
+[
+  {
+    "id": "ex_0000",
+    "name": "pop909_380",
+    "file_path": "pop909_380.mid",
+    "duration_seconds": 40.125,
+    "num_notes": 4465,
+    "time_steps": 1284,
+    "pitch_range": [
+      28,
+      90
+    ],
+    "thumbnail_path": "ex_0000_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0001",
+    "name": "pop909_374",
+    "file_path": "pop909_374.mid",
+    "duration_seconds": 42.125,
+    "num_notes": 4723,
+    "time_steps": 1348,
+    "pitch_range": [
+      36,
+      91
+    ],
+    "thumbnail_path": "ex_0001_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0002",
+    "name": "pop909_167",
+    "file_path": "pop909_167.mid",
+    "duration_seconds": 40.53125,
+    "num_notes": 4028,
+    "time_steps": 1297,
+    "pitch_range": [
+      34,
+      89
+    ],
+    "thumbnail_path": "ex_0002_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0003",
+    "name": "pop909_687",
+    "file_path": "pop909_687.mid",
+    "duration_seconds": 55.9375,
+    "num_notes": 6328,
+    "time_steps": 1790,
+    "pitch_range": [
+      37,
+      81
+    ],
+    "thumbnail_path": "ex_0003_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0004",
+    "name": "pop909_465",
+    "file_path": "pop909_465.mid",
+    "duration_seconds": 36.46875,
+    "num_notes": 4394,
+    "time_steps": 1167,
+    "pitch_range": [
+      36,
+      92
+    ],
+    "thumbnail_path": "ex_0004_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0005",
+    "name": "pop909_364",
+    "file_path": "pop909_364.mid",
+    "duration_seconds": 35.46875,
+    "num_notes": 3884,
+    "time_steps": 1135,
+    "pitch_range": [
+      36,
+      96
+    ],
+    "thumbnail_path": "ex_0005_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0006",
+    "name": "pop909_104",
+    "file_path": "pop909_104.mid",
+    "duration_seconds": 28.75,
+    "num_notes": 2778,
+    "time_steps": 920,
+    "pitch_range": [
+      37,
+      92
+    ],
+    "thumbnail_path": "ex_0006_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0007",
+    "name": "pop909_215",
+    "file_path": "pop909_215.mid",
+    "duration_seconds": 62.78125,
+    "num_notes": 6626,
+    "time_steps": 2009,
+    "pitch_range": [
+      41,
+      97
+    ],
+    "thumbnail_path": "ex_0007_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0008",
+    "name": "pop909_859",
+    "file_path": "pop909_859.mid",
+    "duration_seconds": 69.65625,
+    "num_notes": 7417,
+    "time_steps": 2229,
+    "pitch_range": [
+      41,
+      89
+    ],
+    "thumbnail_path": "ex_0008_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0009",
+    "name": "pop909_651",
+    "file_path": "pop909_651.mid",
+    "duration_seconds": 28.375,
+    "num_notes": 3138,
+    "time_steps": 908,
+    "pitch_range": [
+      37,
+      87
+    ],
+    "thumbnail_path": "ex_0009_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0010",
+    "name": "pop909_866",
+    "file_path": "pop909_866.mid",
+    "duration_seconds": 44.5625,
+    "num_notes": 5666,
+    "time_steps": 1426,
+    "pitch_range": [
+      36,
+      89
+    ],
+    "thumbnail_path": "ex_0010_thumb.png",
+    "tags": []
+  },
+  {
+    "id": "ex_0011",
+    "name": "pop909_889",
+    "file_path": "pop909_889.mid",
+    "duration_seconds": 37.15625,
+    "num_notes": 4410,
+    "time_steps": 1189,
+    "pitch_range": [
+      36,
+      96
+    ],
+    "thumbnail_path": "ex_0011_thumb.png",
+    "tags": []
+  }
+]

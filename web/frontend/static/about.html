@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About - FractalMIDI</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>🎵 FractalMIDI</h1>
+            <p class="subtitle">About the Project</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="panel">
+            <h2>What is FractalMIDI?</h2>
+            <p>
+                FractalMIDI is a hierarchical music generation system based on fractal generative models.
+                It generates piano roll music through a multi-level autoregressive process, creating
+                complex musical structures from simple patterns.
+            </p>
+        </section>
+
+        <section class="panel">
+            <h2>Technical Architecture</h2>
+            <p>
+                The model uses a 4-level hierarchy, where each level generates patches that are refined
+                by the next level. This fractal approach allows for both global structure and local detail
+                in the generated music.
+            </p>
+            <ul>
+                <li><strong>Level 0:</strong> Full piano roll (128 pitches × T time steps)</li>
+                <li><strong>Level 1:</strong> 16×16 patches</li>
+                <li><strong>Level 2:</strong> 4×4 patches</li>
+                <li><strong>Level 3:</strong> 1×1 velocity values</li>
+            </ul>
+        </section>
+
+        <section class="panel">
+            <h2>Generation Modes</h2>
+            <h3>Unconditional Generation</h3>
+            <p>Generate music from scratch with no constraints.</p>
+            
+            <h3>Conditional Generation</h3>
+            <p>Continue from a given musical phrase, maintaining style and structure.</p>
+            
+            <h3>Inpainting</h3>
+            <p>Fill in missing or erased regions while preserving surrounding context.</p>
+        </section>
+
+        <section class="panel">
+            <h2>Model Types</h2>
+            <h3>MAR (Masked Autoregressive)</h3>
+            <p>
+                Generates patches through iterative refinement, predicting masked tokens.
+                Generally produces higher quality results.
+            </p>
+            
+            <h3>AR (Autoregressive)</h3>
+            <p>
+                Generates patches sequentially in raster scan order (row-major or column-major).
+                Faster but may be slightly lower quality.
+            </p>
+        </section>
+
+        <section class="panel">
+            <h2>References</h2>
+            <p>
+                Based on the FractalGen architecture for hierarchical image generation,
+                adapted for piano roll music generation.
+            </p>
+        </section>
+
+        <div style="text-align: center; margin: 2rem 0;">
+            <a href="/static/index.html" class="btn btn-primary">Back to App</a>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2024 FractalMIDI</p>
+        </div>
+    </footer>
+</body>
+</html>
+

@@ -1,6 +1,7 @@
 # Training outputs
 outputs/
 inference/
+*.npz
 
 # Python cache
 __pycache__/

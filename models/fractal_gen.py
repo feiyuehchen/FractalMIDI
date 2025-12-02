@@ -32,6 +32,7 @@ class PianoRollFractalGen(nn.Module):
                  scan_order=None,
                  mask_ratio_loc=None,
                  mask_ratio_scale=None,
+                 ar_prefix_mask_ratio=None,
                  piano_roll_height=None,
                  max_crop_length=None,
                  model_config=None,
@@ -139,9 +140,10 @@ class PianoRollFractalGen(nn.Module):
             velocity_vocab_size=config.piano_roll.velocity_vocab_size,  # Pass vocab size
         )
         
-        # Add scan_order for AR generators
+        # Add scan_order and ar_prefix_mask_ratio for AR generators
         if generator_type_list[fractal_level] == "ar":
             generator_kwargs['scan_order'] = config.generator.scan_order
+            generator_kwargs['ar_prefix_mask_ratio'] = config.generator.ar_prefix_mask_ratio
         
         # Add mask_ratio parameters for MAR generators
         if generator_type_list[fractal_level] == "mar":
@@ -199,13 +201,15 @@ class PianoRollFractalGen(nn.Module):
 
     def sample(self, batch_size, cond_list=None, num_iter_list=None, cfg=1.0, cfg_schedule="constant",
                temperature=1.0, filter_threshold=0, fractal_level=0, visualize=False, return_intermediates=False,
-               _intermediates_list=None, _patch_pos=None, target_width=None):
+               _intermediates_list=None, _patch_pos=None, target_width=None, inpainting_mask=None, inpainting_target=None):
         """
         Generate samples recursively, optionally returning intermediate outputs from all levels.
         
         Args:
             target_width: Target width for generation. If None, uses config.piano_roll.max_width.
                          Common values: 128 (for 128x128), 256 (for 128x256), 512 (for 128x512)
+            inpainting_mask: Tensor (B, seq_len) where 1=generate (unknown), 0=keep (known). Only used at Level 0.
+            inpainting_target: Tensor (B, seq_len, patch_dim) containing known content. Only used at Level 0.
         """
         # Use config max_width if target_width not specified
         if target_width is None:
@@ -214,25 +218,43 @@ class PianoRollFractalGen(nn.Module):
         if cond_list is None:
             # Use dummy condition
             dummy_embedding = self.dummy_cond.expand(batch_size, -1)
+            
+            # If CFG is enabled, we need to double the condition batch size
+            # The generator expects cond_list to have size 2*B if cfg != 1.0
+            if cfg != 1.0:
+                dummy_embedding = torch.cat([dummy_embedding, dummy_embedding], dim=0)
+                
             cond_list = [dummy_embedding for _ in range(self.config.generator.num_conds)]
 
         # Initialize intermediates with accumulation canvas at top level
         if return_intermediates and fractal_level == 0 and _intermediates_list is None:
             _intermediates_list = {
                 'frames': [],  # List of intermediate frames
-                # Initialize with 0 (silence) for unconditional generation
-                # During training, -1 is used as mask token, but for sampling we start from silence
-                'canvas': torch.zeros((batch_size, 1, self.config.piano_roll.height, target_width))  # Accumulation canvas
+                # Initialize with -1 (mask token) for inpainting-style generation
+                # This matches training distribution better than starting from silence (0)
+                'canvas': torch.full((batch_size, 1, self.config.piano_roll.height, target_width), fill_value=-1.0)  # Accumulation canvas
             }
+            
+            # If doing inpainting, initialize canvas with target where known
+            if inpainting_mask is not None and inpainting_target is not None:
+                # We need to unpatchify the target to put it on canvas
+                # Assuming inpainting_target is Level 0 patches
+                # We can reuse the generator's unpatchify if available, or just use the provided target if it was already an image?
+                # The API expects inpainting_target to be patches.
+                # Let's assume the caller handles canvas init or we do it later when updates happen.
+                # Actually, MAR.sample initializes patches with inpainting_target, so intermediate updates will reflect it.
+                pass
 
         if fractal_level < self.num_fractal_levels - 2:
             # For next fractal level, wrap the sample call with position tracking
             def next_level_sample_function(cond_list, cfg, temperature, filter_threshold, patch_pos=None):
-                result = self.next_fractal.sample(
-                    batch_size=cond_list[0].size(0) if cfg == 1.0 else cond_list[0].size(0) // 2,
+                # Pass cfg=1.0 to child levels to prevent double-splitting the batch.
+                # The batch is already doubled (Pos+Neg) by the parent if CFG > 1.0.
+                return self.next_fractal.sample(
+                    batch_size=cond_list[0].size(0),
                     cond_list=cond_list,
                     num_iter_list=num_iter_list,
-                    cfg=cfg,
+                    cfg=1.0, 
                     cfg_schedule="constant",
                     temperature=temperature,
                     filter_threshold=filter_threshold,
@@ -242,41 +264,46 @@ class PianoRollFractalGen(nn.Module):
                     _patch_pos=patch_pos,  # Pass position down
                     target_width=None  # Only Level 0 uses target_width
                 )
-                return result
         else:
             # For velocity loss level (Level 3), wrap to pass intermediates and position
             def next_level_sample_function(cond_list, cfg, temperature, filter_threshold, patch_pos=None):
-                result = self.next_fractal.sample(
+                # Level 3 needs to know the real CFG to perform the logit subtraction (sharpening).
+                # However, it relies on having [Pos, Neg] pairs.
+                # Since MAR shuffling breaks pairs, we disable CFG sharpening at pixel level 
+                # and rely on the separate Pos/Neg trajectories established by Level 0.
+                return self.next_fractal.sample(
                     cond_list=cond_list,
                     temperature=temperature,
-                    cfg=cfg,
+                    cfg=1.0, # Force 1.0 here as well for stability
                     filter_threshold=filter_threshold,
                     _intermediates_list=_intermediates_list if return_intermediates else None,
                     _current_level=fractal_level + 1 if return_intermediates else None,
                     _patch_pos=patch_pos
                 )
-                # If recording and position is provided, update canvas with 1x1 result
-                if _intermediates_list is not None and patch_pos is not None:
-                    h_start, w_start, h_size, w_size = patch_pos
-                    # Upsample 1x1 to patch size
-                    vel_img = result.reshape(result.size(0), 1, 1, 1)
-                    vel_upsampled = torch.nn.functional.interpolate(
-                        vel_img, size=(h_size, w_size), mode='nearest'
-                    )
-                    # Update canvas
-                    _intermediates_list['canvas'][:result.size(0), :, h_start:h_start+h_size, w_start:w_start+w_size] = vel_upsampled
-                    # Don't record frame here - will be recorded by parent level
-                return result
+        
+        # Prepare kwargs for generator sample
+        sample_kwargs = dict(
+            cond_list=cond_list,
+            num_iter=num_iter_list[fractal_level],
+            cfg=cfg,
+            cfg_schedule=cfg_schedule,
+            temperature=temperature,
+            filter_threshold=filter_threshold,
+            next_level_sample_function=next_level_sample_function,
+            visualize=visualize,
+            _intermediates_list=_intermediates_list if return_intermediates else None,
+            _current_level=fractal_level,
+            _patch_pos=_patch_pos,
+            target_width=target_width if fractal_level == 0 else None
+        )
+        
+        # Pass inpainting args only to Level 0
+        if fractal_level == 0:
+            sample_kwargs['inpainting_mask'] = inpainting_mask
+            sample_kwargs['inpainting_target'] = inpainting_target
 
         # Recursively sample with intermediate recording
-        result = self.generator.sample(
-            cond_list, num_iter_list[fractal_level], cfg, cfg_schedule,
-            temperature, filter_threshold, next_level_sample_function, visualize,
-            _intermediates_list=_intermediates_list if return_intermediates else None,
-            _current_level=fractal_level,  # Always pass level for correct shape calculation
-            _patch_pos=_patch_pos,
-            target_width=target_width if fractal_level == 0 else None  # Only Level 0 uses target_width
-        )
+        result = self.generator.sample(**sample_kwargs)
         
         # Return with intermediates at top level
         if return_intermediates and fractal_level == 0:

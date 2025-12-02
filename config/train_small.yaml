@@ -13,15 +13,16 @@ model:
   embed_dim_list: [256, 256, 128, 64]     # Half the default size
   num_blocks_list: [8, 4, 2, 1]          # Fewer transformer blocks
   num_heads_list: [4, 2, 1, 1]           # Fewer attention heads
-  attn_dropout: 0.1                      # More dropout for smaller model
-  proj_dropout: 0.1
+  attn_dropout: 0.2                      # More dropout for smaller model
+  proj_dropout: 0.2
   init_std: 0.02
   
   # Generator configuration
-  generator_types: [ar, ar, ar, ar]
+  generator_types: [ar, mar, mar, mar]
   scan_order: column_major
-  mask_ratio_loc: 1.0
-  mask_ratio_scale: 0.5
+  mask_ratio_loc: 1.0                    # MAR: mean mask ratio
+  mask_ratio_scale: 0.8                   # MAR: std of mask ratio
+  ar_prefix_mask_ratio: 1.0               # AR: max prefix mask ratio (1.0 = can mask 100% of prefix)
   num_conds: 5
   
   # Training settings
@@ -30,10 +31,10 @@ model:
 
 # Training configuration
 training:
-  max_steps: 30000                       # AR needs more steps
+  max_steps: 200000                      
   learning_rate: 1.0e-4
   weight_decay: 0.05
-  warmup_steps: 2000                     # Longer warmup for stability
+  warmup_steps: 2000                    
   grad_clip: 3.0
   accumulate_grad_batches: 2
   train_batch_size: 8
@@ -41,14 +42,14 @@ training:
 
 # Data configuration
 data:
-  train_data: dataset/train.txt
-  val_data: dataset/valid.txt
+  train_data: dataset/pop909/train.txt
+  val_data: dataset/pop909/valid.txt
   crop_length: 256                       
-  augment_factor: 5                       # Random crop augmentation factor
+  augment_factor: 10                      # Random crop augmentation factor
   pitch_shift_min: -12                    # Minimum pitch shift (semitones)
   pitch_shift_max: 12    
   cache_in_memory: true
-  cache_dir: null
+  cache_dir: dataset/cache/pop909
 
 # Hardware configuration
 hardware:
@@ -61,12 +62,12 @@ hardware:
 
 # Logging and checkpointing
 logging:
-  output_dir: outputs/fractalgen_small
+  output_dir: outputs/pop909_ar_3mar
   log_every_n_steps: 50
   val_check_interval_steps: 2000
-  checkpoint_every_n_steps: 5000
+  checkpoint_every_n_steps: 10000
   save_top_k: 3
-  log_images_every_n_steps: 2000
+  log_images_every_n_steps: 10000
   num_images_to_log: 2
 
 # Other

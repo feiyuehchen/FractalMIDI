@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FractalMIDI - Visual Art Generator</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/editor_style.css">
+    <script src="/static/js/fractal_loader.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;500;700&family=Space+Mono&display=swap" rel="stylesheet">
+    <style>
+        /* Quick Overlay Styles */
+        #nav-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(18, 18, 20, 0.95);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+        }
+        #nav-overlay.visible { display: flex; }
+        .overlay-content {
+            max-width: 800px;
+            padding: 40px;
+            background: #1e1e24;
+            border: 1px solid #333;
+            box-shadow: 0 0 30px rgba(0,0,0,0.5);
+            position: relative;
+        }
+        .close-overlay {
+            position: absolute;
+            top: 10px; right: 10px;
+            background: none; border: none; color: #fff; font-size: 24px; cursor: pointer;
+        }
+        .overlay-body h1 { color: #00f3ff; margin-top: 0; }
+        .overlay-body p { line-height: 1.6; color: #ccc; }
+    </style>
+</head>
+<body>
+    <div id="app-container">
+        <!-- Left Sidebar -->
+        <aside id="sidebar-left" class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-glitch" data-text="FractalMIDI">FractalMIDI</div>
+                <button id="sidebar-left-toggle" class="btn-icon">✕</button>
+            </div>
+            
+            <div class="sidebar-tabs">
+                <button class="tab-switch active" data-target="panel-controls">CONTROLS</button>
+                <button class="tab-switch" data-target="panel-nav">NAVIGATE</button>
+            </div>
+
+            <div class="sidebar-content-wrapper">
+                <div id="panel-controls" class="sidebar-pane active">
+                    <!-- Status Bar -->
+                    <div class="status-bar">
+                        <span class="status-dot"></span>
+                        <span id="status-text">SYSTEM READY</span>
+                    </div>
+
+                    <!-- Generate Action -->
+                    <div class="control-section highlight-section">
+                        <button id="generate-btn" class="btn-cyber btn-glitch">
+                            <span class="btn-text">INITIALIZE GEN</span>
+                            <span class="btn-decoration">_</span>
+                        </button>
+                        <div id="progress-container" style="display: none;">
+                            <div class="progress-track">
+                                <div id="progress-fill" class="progress-fill"></div>
+                            </div>
+                            <p id="progress-text" class="mono-text">0%</p>
+                        </div>
+                    </div>
+
+                    <!-- Regenerate Mask Action -->
+                    <div id="edit-actions" class="control-section" style="display: none;">
+                         <button id="regenerate-btn" class="btn-cyber" style="border-color: var(--accent-secondary); color: var(--accent-secondary);">
+                            <span class="btn-text">REGENERATE MASK</span>
+                        </button>
+                    </div>
+
+                    <!-- Model Select -->
+                    <div class="control-section">
+                        <h3><span class="icon">⟁</span> CORE MODEL</h3>
+                        <select id="checkpoint-select" class="cyber-select">
+                            <option value="">Please wait...</option>
+                        </select>
+                        <div id="model-info" class="model-info-box" style="display: none; margin-top: 8px; font-size: 0.8em; color: var(--accent);">
+                             <span id="model-info-text"></span>
+                        </div>
+                        <div class="radio-group-cyber">
+                            <label class="radio-cyber"><input type="radio" name="generator" value="mar" checked><span>MAR</span></label>
+                            <label class="radio-cyber"><input type="radio" name="generator" value="ar"><span>AR</span></label>
+                        </div>
+                        <div id="scan-order-group" style="display: none; margin-top: 10px;">
+                            <div class="radio-group-cyber">
+                                <label class="radio-cyber"><input type="radio" name="scan-order" value="row_major" checked><span>ROW</span></label>
+                                <label class="radio-cyber"><input type="radio" name="scan-order" value="column_major"><span>COL</span></label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Mode Select -->
+                    <div class="control-section">
+                        <h3><span class="icon">◈</span> GENERATION MODE</h3>
+                        <div class="mode-selector">
+                            <button class="mode-btn active" data-mode="unconditional">VOID</button>
+                            <button class="mode-btn" data-mode="conditional">SEED</button>
+                            <button class="mode-btn" data-mode="inpainting">MEND</button>
+                        </div>
+                        <div class="mode-params active" id="mode-unconditional">
+                            <div class="param-row">
+                                <label>LENGTH</label>
+                                <input type="range" id="uncond-length" min="128" max="1024" value="256" step="16">
+                                <span id="uncond-length-value" class="value-display">256</span>
+                            </div>
+                        </div>
+                        <div class="mode-params" id="mode-conditional">
+                            <select id="cond-example-select" class="cyber-select small"><option value="">SELECT SEED...</option></select>
+                            <div class="param-row">
+                                <label>SEED LEN</label>
+                                <input type="range" id="cond-length" min="16" max="128" value="32" step="16">
+                                <span id="cond-length-value" class="value-display">32</span>
+                            </div>
+                        </div>
+                        <div class="mode-params" id="mode-inpainting">
+                            <select id="inpaint-example-select" class="cyber-select small"><option value="">SELECT SOURCE...</option></select>
+                        </div>
+                    </div>
+
+                    <!-- Flux Parameters -->
+                    <div class="control-section">
+                        <h3><span class="icon">⚡</span> FLUX PARAMETERS</h3>
+                        <div class="param-row">
+                            <label>CHAOS (Temp)</label>
+                            <input type="range" id="temperature" min="0.1" max="2.0" value="1.0" step="0.1">
+                            <span id="temperature-value" class="value-display">1.0</span>
+                        </div>
+                        <div class="param-row">
+                            <label>ORDER (CFG)</label>
+                            <input type="range" id="cfg" min="1.0" max="5.0" value="1.0" step="0.1">
+                            <span id="cfg-value" class="value-display">1.0</span>
+                        </div>
+                    </div>
+
+                    <!-- Display Options -->
+                    <div class="control-section">
+                        <h3><span class="icon">👁</span> VISUALIZATION</h3>
+                        <div class="checkbox-row">
+                            <label class="checkbox-cyber"><input type="checkbox" id="create-gif" checked><span class="checkmark"></span>RECORD GIF</label>
+                            <label class="checkbox-cyber"><input type="checkbox" id="show-grid"><span class="checkmark"></span>GRID</label>
+                        </div>
+                    </div>
+                    
+                    <!-- Results Mini-View -->
+                    <div id="results-panel" class="control-section results-hidden" style="display: none;">
+                        <h3>OUTPUT</h3>
+                        <div class="result-preview">
+                             <img id="result-image" src="" alt="Generated Result" style="width: 100%; border-radius: 4px; margin-bottom: 10px; display: none;">
+                        </div>
+                        <div class="results-actions">
+                            <a id="download-midi-btn" class="btn-icon-cyber" download>MIDI</a>
+                            <a id="download-image-btn" class="btn-icon-cyber" download>IMG</a>
+                            <a id="download-gif-btn" class="btn-icon-cyber" download style="display: none;">GIF</a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Navigation -->
+                <div id="panel-nav" class="sidebar-pane">
+                     <nav class="main-nav">
+                        <a href="#" class="nav-item active" data-page="generator"><span class="nav-num">01</span><span class="nav-label">GENERATOR</span></a>
+                        <a href="#" class="nav-item" data-page="about"><span class="nav-num">02</span><span class="nav-label">ABOUT</span></a>
+                    </nav>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Left Toggle -->
+        <button id="sidebar-left-show-btn" class="floating-toggle left">☰</button>
+
+        <!-- Main Canvas Stage -->
+        <main id="stage">
+            <!-- Editor Toolbar -->
+            <div class="editor-toolbar">
+                <div class="toolbar-group">
+                    <div class="mode-switch-container">
+                        <div class="mode-option active" data-view-mode="view">VIEW</div>
+                        <div class="mode-option edit-mode" data-view-mode="edit">EDIT</div>
+                    </div>
+                </div>
+
+                <div class="toolbar-group transport-controls">
+                    <button id="stop-btn" class="transport-btn">⏹</button>
+                    <button id="play-btn" class="transport-btn">▶</button>
+                    <button id="loop-btn" class="transport-btn" style="font-size: 1.2em;">⟳</button>
+                </div>
+                
+                <!-- Tempo Control -->
+                <div class="toolbar-group">
+                    <label for="tempo-input" style="font-size: 0.8em; color: var(--text-dim); margin-right: 5px; font-weight:bold;">BPM</label>
+                    <input type="number" id="tempo-input" value="120" min="40" max="300" style="width: 50px; background: #2a2a30; border: 1px solid #333; color: #fff; padding: 4px; border-radius: 4px; text-align: center;">
+                </div>
+
+                 <div class="toolbar-group">
+                     <button id="undo-btn" class="tool-btn" title="Undo (Ctrl+Z)">↶</button>
+                     <button id="redo-btn" class="tool-btn" title="Redo (Ctrl+Y)">↷</button>
+                     <div class="zoom-controls" style="display:flex; gap:5px;">
+                         <button id="zoom-out-btn" class="tool-btn">－</button>
+                         <button id="reset-view-btn" class="tool-btn">1:1</button>
+                         <button id="zoom-in-btn" class="tool-btn">＋</button>
+                     </div>
+                 </div>
+                
+                <div class="toolbar-group" style="margin-left: auto;">
+                    <button id="sidebar-right-toggle-top" class="tool-btn" title="Tools">🛠</button>
+                </div>
+            </div>
+
+            <!-- Canvas Area -->
+            <div id="canvas-container">
+                <canvas id="editor-canvas"></canvas>
+                <!-- Overlay -->
+                <div id="nav-overlay">
+                    <div class="overlay-content">
+                        <button class="close-overlay" onclick="document.getElementById('nav-overlay').classList.remove('visible')">✕</button>
+                        <div class="overlay-body">
+                            <!-- Dynamic Content -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="stage-overlay bottom-left">
+                <div class="current-job-display" id="generation-status">READY</div>
+            </div>
+        </main>
+
+        <!-- Right Sidebar (Tools) -->
+        <aside id="sidebar-right" class="sidebar right-sidebar collapsed">
+            <div class="sidebar-header">
+                <h3>TOOLS</h3>
+                <button id="sidebar-right-toggle" class="btn-icon">✕</button>
+            </div>
+            <div class="sidebar-content-wrapper" style="padding: 20px;">
+                 <div class="tool-section">
+                     <h4>DRAWING</h4>
+                     <div class="tool-grid">
+                         <button class="tool-btn-large active" id="tool-pen" data-tool="pen">
+                             <span class="icon">✎</span>
+                             <span>PEN</span>
+                         </button>
+                         <button class="tool-btn-large" id="tool-eraser" data-tool="eraser">
+                             <span class="icon">▨</span>
+                             <span>ERASER</span>
+                         </button>
+                     </div>
+                     <div style="margin-top: 10px;">
+                        <label style="font-size: 0.8em; color: #888;">ERASER MODE</label>
+                        <select id="eraser-mode-select" class="cyber-select small" style="width: 100%; margin-top: 5px;">
+                            <option value="delete">DELETE (BLACK)</option>
+                            <option value="mask">MASK (GRAY)</option>
+                        </select>
+                     </div>
+                 </div>
+                
+                <div class="tool-section">
+                    <h4>BRUSH SIZE</h4>
+                    <input type="range" id="brush-size" class="brush-size-slider" min="1" max="8" value="1" style="width: 100%;">
+                    <div class="size-preview" style="text-align: center; margin-top: 5px; color: var(--text-dim);">1px</div>
+                </div>
+                
+                <div class="tool-section">
+                    <h4>VELOCITY / COLOR</h4>
+                    <div id="color-palette" class="palette-grid">
+                        <!-- JS Generates Swatches -->
+                    </div>
+                </div>
+                
+                <div class="tool-section">
+                    <h4>SETTINGS</h4>
+                     <label class="checkbox-cyber">
+                        <input type="checkbox" id="preview-audio" checked>
+                        <span class="checkmark"></span>
+                        AUDIO PREVIEW
+                    </label>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Right Toggle -->
+        <button id="sidebar-right-show-btn" class="floating-toggle right visible">🛠</button>
+
+    </div>
+
+    <!-- Loading Screen -->
+    <div id="loading-screen" style="display: none;">
+        <canvas id="fractal-canvas" width="200" height="200"></canvas>
+        <div class="loading-content">
+            <h2 class="loading-text">SYSTEM BOOT</h2>
+            <p class="subtitle">LOADING INTERFACE...</p>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="/static/js/EditorCanvas.js?v=10"></script>
+    <script src="/static/js/main.js?v=10"></script>
+    
+    <script>
+        // Layout Manager
+        const app = {
+            leftSidebar: document.getElementById('sidebar-left'),
+            rightSidebar: document.getElementById('sidebar-right'),
+            
+            toggleLeft: () => {
+                app.leftSidebar.classList.toggle('collapsed');
+                document.getElementById('sidebar-left-show-btn').classList.toggle('visible');
+                setTimeout(() => window.editor?.resize(), 300);
+            },
+            
+            toggleRight: () => {
+                app.rightSidebar.classList.toggle('collapsed');
+                document.getElementById('sidebar-right-show-btn').classList.toggle('visible');
+                // Auto switch to edit mode if opening tools? Maybe not.
+                setTimeout(() => window.editor?.resize(), 300);
+            }
+        };
+        
+        // Left Sidebar Events
+        document.getElementById('sidebar-left-toggle').addEventListener('click', app.toggleLeft);
+        document.getElementById('sidebar-left-show-btn').addEventListener('click', app.toggleLeft);
+        
+        // Right Sidebar Events
+        document.getElementById('sidebar-right-toggle').addEventListener('click', app.toggleRight);
+        document.getElementById('sidebar-right-toggle-top').addEventListener('click', app.toggleRight);
+        document.getElementById('sidebar-right-show-btn').addEventListener('click', app.toggleRight);
+        
+        // Tab Switching logic
+        const tabs = document.querySelectorAll('.tab-switch');
+        const panes = document.querySelectorAll('.sidebar-pane');
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                tabs.forEach(t => t.classList.remove('active'));
+                panes.forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.target).classList.add('active');
+            });
+        });
+
+        // Navigation Logic
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                const page = item.dataset.page;
+                if (page === 'generator') {
+                    document.getElementById('nav-overlay').classList.remove('visible');
+                } else if (page === 'about') {
+                    const overlay = document.getElementById('nav-overlay');
+                    const body = overlay.querySelector('.overlay-body');
+                    body.innerHTML = `
+                        <h1>FractalMIDI System</h1>
+                        <p>Visual Generation Engine v1.0</p>
+                        <p>Powered by FractalNet & Transformer architecture.</p>
+                        <p>Developed for creative exploration.</p>
+                    `;
+                    overlay.classList.add('visible');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

@@ -6,7 +6,8 @@ import torch
 
 
 def conditional_generation(model, condition_roll, generation_length, num_iter_list,
-                          cfg=1.0, temperature=1.0, filter_threshold=0):
+                          cfg=1.0, temperature=1.0, filter_threshold=0,
+                          return_intermediates=False, _intermediates_list=None):
     """
     Generate piano roll conditioned on existing sequence.
     
@@ -18,9 +19,12 @@ def conditional_generation(model, condition_roll, generation_length, num_iter_li
         cfg: Classifier-free guidance strength
         temperature: Sampling temperature
         filter_threshold: Filter threshold for low probability tokens
+        return_intermediates: Whether to return intermediate steps
+        _intermediates_list: Optional container for streaming intermediates
     
     Returns:
         Generated piano roll (1, piano_roll_height, cond_length + generation_length)
+        Or (generated, intermediates) if return_intermediates=True
     """
     device = condition_roll.device
     piano_roll_height = model.config.piano_roll.height
@@ -33,39 +37,51 @@ def conditional_generation(model, condition_roll, generation_length, num_iter_li
     padded_length = ((total_length + patch_size - 1) // patch_size) * patch_size
     
     # Create full piano roll with condition
-    full_roll = torch.zeros(1, 1, piano_roll_height, padded_length, device=device)
+    # Initialize with -1 (mask token) for regions to be generated
+    full_roll = torch.full((1, 1, piano_roll_height, padded_length), fill_value=-1.0, device=device)
     full_roll[:, :, :, :cond_length] = condition_roll
     
-    # For true conditional generation, we need to implement partial masking
-    # For now, use the full generation with conditioning as context
-    # This is a simplified version - true implementation would modify the sampling loop
-    
-    # Generate using standard sampling (conditioning is implicit through initialization)
+    # Generate using standard sampling
+    # Pass target_width to ensure correct size
     generated = model.sample(
         batch_size=1,
-        cond_list=None,  # Will use dummy cond
+        cond_list=None,
         num_iter_list=num_iter_list,
         cfg=cfg,
         cfg_schedule="constant",
         temperature=temperature,
         filter_threshold=filter_threshold,
-        fractal_level=0
+        fractal_level=0,
+        target_width=padded_length,
+        return_intermediates=return_intermediates,
+        _intermediates_list=_intermediates_list
     )
     
-    # Restore condition in generated output
+    intermediates = None
+    if isinstance(generated, tuple):
+        generated, intermediates = generated
+    
+    # Restore condition in generated output (Naive conditioning)
+    # This ensures condition is preserved exactly
     generated[:, :, :, :cond_length] = condition_roll
     
     # Trim to target length
     generated = generated[:, :, :, :total_length]
     
-    return generated.squeeze(1)  # Return (1, piano_roll_height, total_length)
+    result = generated.squeeze(1)
+    
+    if return_intermediates:
+        return result, intermediates
+    return result
 
 
 @torch.no_grad()
-def inpainting_generation(model, piano_roll, mask_start, mask_end, num_iter_list,
-                         cfg=1.0, temperature=1.0, filter_threshold=0):
+def inpainting_generation(model, piano_roll, mask_start=None, mask_end=None, num_iter_list=None,
+                         cfg=1.0, temperature=1.0, filter_threshold=0, 
+                         mask=None, return_intermediates=False, _intermediates_list=None):
     """
     Generate piano roll with inpainting (fill masked region).
+    Supports either (mask_start, mask_end) or arbitrary mask tensor.
     
     Args:
         model: FractalGen model
@@ -76,6 +92,9 @@ def inpainting_generation(model, piano_roll, mask_start, mask_end, num_iter_list
         cfg: Classifier-free guidance strength
         temperature: Sampling temperature
         filter_threshold: Filter threshold for low probability tokens
+        mask: Boolean mask tensor (1, 1, H, W) where True = Generate, False = Keep
+        return_intermediates: Whether to return intermediate steps
+        _intermediates_list: Optional container for streaming intermediates
     
     Returns:
         Inpainted piano roll (1, piano_roll_height, duration)
@@ -84,21 +103,58 @@ def inpainting_generation(model, piano_roll, mask_start, mask_end, num_iter_list
     piano_roll_height = model.config.piano_roll.height
     patch_size = model.config.piano_roll.patch_size
     
-    duration = piano_roll.shape[2]
+    # Handle input shape
+    if piano_roll.dim() == 3:
+        piano_roll = piano_roll.unsqueeze(1) # (1, 1, H, W)
+        
+    duration = piano_roll.shape[3]
     
     # Pad to patch size
     padded_duration = ((duration + patch_size - 1) // patch_size) * patch_size
     
-    # Create padded version with masked region zeroed
-    padded_roll = torch.zeros(1, 1, piano_roll_height, padded_duration, device=device)
-    padded_roll[:, :, :, :duration] = piano_roll.unsqueeze(1) if piano_roll.dim() == 3 else piano_roll
+    # Create padded version of input
+    padded_roll = torch.full((1, 1, piano_roll_height, padded_duration), fill_value=-1.0, device=device)
+    padded_roll[:, :, :, :duration] = piano_roll
     
-    # For true inpainting, we need patch-level masking
-    # For now, use simple approach: zero out mask region and regenerate
-    original_masked = padded_roll[:, :, :, mask_start:mask_end].clone()
-    padded_roll[:, :, :, mask_start:mask_end] = 0
+    # Prepare Boolean Mask (True = Generate/Masked, False = Keep)
+    if mask is None:
+        if mask_start is None or mask_end is None:
+             # If no mask provided, treat as unconditional (generate all)
+             mask_bool = torch.ones((1, 1, piano_roll_height, padded_duration), dtype=torch.bool, device=device)
+             if mask_start is not None and mask_end is not None:
+                 # Reset to zeros then set region
+                 mask_bool.fill_(False)
+                 mask_bool[:, :, :, mask_start:mask_end] = True
+        else:
+             mask_bool = torch.zeros((1, 1, piano_roll_height, padded_duration), dtype=torch.bool, device=device)
+             mask_bool[:, :, :, mask_start:mask_end] = True
+    else:
+        # Handle provided mask
+        if mask.dim() == 3: mask = mask.unsqueeze(1)
+        mask_bool = mask.bool().to(device)
+        # Pad mask if needed
+        if mask_bool.shape[3] < padded_duration:
+             pad_m = torch.zeros((1, 1, piano_roll_height, padded_duration), dtype=torch.bool, device=device)
+             pad_m[:, :, :, :mask.shape[3]] = mask
+             mask_bool = pad_m
+        elif mask_bool.shape[3] > padded_duration:
+             mask_bool = mask_bool[:, :, :, :padded_duration]
+
+    # Construct Inpainting Inputs for Level 0
+    # Patchify mask to Level 0 granularity (16x16)
+    # If ANY pixel in a patch is masked (True), the whole patch is masked (True).
+    l0_patch_size = model.generator.patch_size
+    mask_pooled = torch.nn.functional.max_pool2d(
+        mask_bool.float(), 
+        kernel_size=l0_patch_size, 
+        stride=l0_patch_size
+    )
+    inpainting_mask = mask_pooled.flatten(1) # (B, seq_len)
     
-    # Generate full piano roll (simplified - true implementation needs patch masking)
+    # Patchify target (padded_roll) to Level 0 patches
+    inpainting_target = model.generator.patchify(padded_roll)
+
+    # Generate with inpainting constraints
     generated = model.sample(
         batch_size=1,
         cond_list=None,
@@ -107,21 +163,29 @@ def inpainting_generation(model, piano_roll, mask_start, mask_end, num_iter_list
         cfg_schedule="constant",
         temperature=temperature,
         filter_threshold=filter_threshold,
-        fractal_level=0
+        fractal_level=0,
+        target_width=padded_duration,
+        return_intermediates=return_intermediates,
+        inpainting_mask=inpainting_mask,
+        inpainting_target=inpainting_target,
+        _intermediates_list=_intermediates_list
     )
     
-    # Copy unmasked regions from original
-    result = generated.clone()
-    result[:, :, :, :mask_start] = padded_roll[:, :, :, :mask_start]
-    result[:, :, :, mask_end:duration] = padded_roll[:, :, :, mask_end:duration]
+    intermediates = None
+    if isinstance(generated, tuple):
+        generated, intermediates = generated
     
-    # Trim to original length
+    # Ensure generated shape matches padding
+    if generated.shape[3] > padded_duration:
+        generated = generated[:, :, :, :padded_duration]
+    
+    # Strict Mix: Enforce known pixels exactly
+    # Use generated where mask is True (Unknown), else use original (padded_roll)
+    result = torch.where(mask_bool, generated, padded_roll)
+    
+    # Trim to original duration
     result = result[:, :, :, :duration]
     
-    return result.squeeze(1)  # Return (1, piano_roll_height, duration)
-
-
-# ==============================================================================
-# Utility Functions
-# ==============================================================================
-
+    if return_intermediates:
+        return result.squeeze(1), intermediates
+    return result.squeeze(1)

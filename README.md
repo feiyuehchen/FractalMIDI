@@ -57,6 +57,32 @@ pip install -r requirements.txt
 
 ### 2. 準備數據
 
+#### 方法 1: 使用 preprocess.py（推薦）
+
+自動生成訓練/驗證/測試集分割（99.8% / 0.1% / 0.1%）：
+
+```bash
+# POP909 資料集
+python preprocess.py --dataset pop909
+
+# Aria MIDI 資料集 (aria-midi-v1-unique-ext)
+python preprocess.py --dataset ariamidi
+
+# 自訂輸出目錄（可選）
+python preprocess.py --dataset ariamidi --output-dir /path/to/output
+```
+
+這會自動產生以下檔案：
+- `dataset/{dataset_name}/train.txt` - 訓練集檔案列表
+- `dataset/{dataset_name}/valid.txt` - 驗證集檔案列表
+- `dataset/{dataset_name}/test.txt` - 測試集檔案列表
+
+**支援的資料集：**
+- `pop909`: POP909 資料集 (`~/dataset/POP909-Dataset/POP909`)
+- `ariamidi`: Aria MIDI v1 資料集 (`~/dataset/aria-midi-v1-unique-ext/data`)
+
+#### 方法 2: 手動創建列表
+
 ```bash
 # 創建數據集列表
 find /path/to/midi/files -name "*.mid" > dataset/train.txt
@@ -275,8 +301,8 @@ training:
 
 # 數據配置
 data:
-  train_data: dataset/train.txt
-  val_data: dataset/valid.txt
+  train_data: dataset/ariamidi/train.txt  # 使用 preprocess.py 生成的列表
+  val_data: dataset/ariamidi/valid.txt
   crop_length: 512                        # 時間維度長度（128x512 piano roll）
   augment_factor: 1
   pitch_shift_min: -3

@@ -261,6 +261,10 @@ def midi_to_piano_roll(midi_path, ticks_per_16th=120, target_length=None):
             if start_16th >= length:
                 continue
             
+            # Ensure minimum duration of 1 time step
+            if end_16th <= start_16th:
+                end_16th = start_16th + 1
+            
             end_16th = min(end_16th, length)
             
             velocity_norm = note.velocity / 127.0
@@ -277,11 +281,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description='FractalGen MIDI Inference')
     
     # Config file
-    parser.add_argument('--config', type=str, default=None,
+    parser.add_argument('-c', '--config', type=str, default=None,
                        help='Path to YAML config file (e.g., config/inference_default.yaml)')
     
     # Model
-    parser.add_argument('--checkpoint', type=str, default=None,
+    parser.add_argument('-ckpt', '--checkpoint', type=str, default=None,
                        help='Path to model checkpoint')
     
     # Generation mode
@@ -294,9 +298,9 @@ def parse_args():
     # Unconditional generation
     parser.add_argument('--num_samples', type=int, default=4,
                        help='Number of samples to generate (unconditional mode)')
-    parser.add_argument('--generation_length', type=int, default=512,
+    parser.add_argument('--generation_length', type=int, default=256,
                        help='Length of generated sequence (in 16th notes, default 512 for 128x512)')
-    parser.add_argument('--target_width', type=int, default=512,
+    parser.add_argument('--target_width', type=int, default=256,
                        help='Target width for generation (128, 256, 512, etc.). Default: 512 (for 128x512), 256 (for 128x256), 128 (for 128x128)')
     
     # Conditional generation
@@ -322,17 +326,17 @@ def parse_args():
                        help='Sampling temperature')
     parser.add_argument('--sparsity_bias', type=float, default=0.0,
                        help='Bias to encourage sparsity (higher = sparser, 0 = no bias)')
-    parser.add_argument('--velocity_threshold', type=float, default=0.10,
+    parser.add_argument('--velocity_threshold', type=float, default=0.05,
                        help='Minimum velocity to create a note (0-1)')
     
     # Output
-    parser.add_argument('--output_dir', type=str, default='outputs/inference',
+    parser.add_argument('-o', '--output_dir', type=str, default='outputs/inference',
                        help='Output directory')
     parser.add_argument('--save_images', action='store_true',
                        help='Save piano roll images')
     
     # Hardware
-    parser.add_argument('--device', type=str, default='cuda:0',
+    parser.add_argument('--device', type=str, default='cuda:2',
                        help='Device to use')
     
     return parser.parse_args()

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documentation - FractalMIDI</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>🎵 FractalMIDI</h1>
+            <p class="subtitle">Documentation</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="panel">
+            <h2>Quick Start</h2>
+            <ol>
+                <li>Load a model checkpoint from the dropdown</li>
+                <li>Choose a generation mode (Unconditional, Conditional, or Inpainting)</li>
+                <li>Adjust parameters as desired</li>
+                <li>Click "Generate" and wait for results</li>
+                <li>Download MIDI, image, or GIF</li>
+            </ol>
+        </section>
+
+        <section class="panel">
+            <h2>API Endpoints</h2>
+            <h3>GET /api/status</h3>
+            <p>Get system status and model information.</p>
+            
+            <h3>GET /api/models/list</h3>
+            <p>List available model checkpoints.</p>
+            
+            <h3>POST /api/models/load</h3>
+            <p>Load a specific checkpoint.</p>
+            
+            <h3>POST /api/generate</h3>
+            <p>Start a generation job (returns job ID).</p>
+            
+            <h3>GET /api/generate/{job_id}</h3>
+            <p>Check status of a generation job.</p>
+            
+            <h3>WebSocket /ws/generate</h3>
+            <p>Real-time generation with progress updates.</p>
+        </section>
+
+        <section class="panel">
+            <h2>Running the Server</h2>
+            <pre><code>cd web/backend
+python app.py</code></pre>
+            <p>Server will start on http://localhost:8000</p>
+        </section>
+
+        <section class="panel">
+            <h2>Docker Deployment</h2>
+            <pre><code>docker-compose up -d</code></pre>
+            <p>See docker-compose.yml for configuration.</p>
+        </section>
+
+        <div style="text-align: center; margin: 2rem 0;">
+            <a href="/static/index.html" class="btn btn-primary">Back to App</a>
+        </div>
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2024 FractalMIDI</p>
+        </div>
+    </footer>
+</body>
+</html>
+

@@ -145,6 +145,24 @@ def apply_config_defaults(args):
     if args.prefetch_factor is None:
         args.prefetch_factor = 2
     
+    # Model architecture defaults
+    if not hasattr(args, 'img_size_list'):
+        args.img_size_list = (128, 16, 4, 1)
+    if not hasattr(args, 'embed_dim_list'):
+        args.embed_dim_list = (512, 256, 128, 64)
+    if not hasattr(args, 'num_blocks_list'):
+        args.num_blocks_list = (12, 3, 2, 1)
+    if not hasattr(args, 'num_heads_list'):
+        args.num_heads_list = (8, 4, 2, 2)
+    if not hasattr(args, 'attn_dropout'):
+        args.attn_dropout = 0.0
+    if not hasattr(args, 'proj_dropout'):
+        args.proj_dropout = 0.0
+    if not hasattr(args, 'v_weight'):
+        args.v_weight = 1.0
+    if not hasattr(args, 'num_conds'):
+        args.num_conds = 5
+
     return args
 
 

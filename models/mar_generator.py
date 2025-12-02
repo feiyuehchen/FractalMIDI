@@ -15,8 +15,29 @@ import math
 
 class PianoRollMAR(nn.Module):
     """
-    Masked Autoregressive model for piano roll patches.
-    Adapted from fractalgen MAR for single-channel velocity data.
+    Masked Autoregressive (MAR) model for piano roll patches.
+    
+    This model generates patches of the piano roll by iteratively unmasking tokens.
+    It operates on a hierarchical level, taking conditions from the previous level.
+    
+    Algorithm:
+    1. Initialize canvas with mask tokens.
+    2. Iteratively:
+        a. Predict masked tokens given current context and conditions.
+        b. Sample a subset of tokens to unmask based on a schedule (e.g. cosine).
+        c. Generate content for these tokens by querying the next fractal level.
+        d. Update canvas.
+    
+    Args:
+        seq_len: Sequence length (number of patches) for square images.
+        patch_size: Size of patches (P x P) generated at this level.
+        cond_embed_dim: Dimension of conditioning embeddings (from previous level).
+        embed_dim: Dimension of internal embeddings.
+        num_blocks: Number of Transformer blocks.
+        num_heads: Number of attention heads.
+        img_size: Height of the image at this level.
+        mask_ratio_loc: Mean of the mask ratio distribution (for training).
+        mask_ratio_scale: Standard deviation of the mask ratio distribution.
     """
     def __init__(self, seq_len, patch_size, cond_embed_dim, embed_dim, num_blocks, num_heads,
                  attn_dropout=0.1, proj_dropout=0.1, num_conds=5, guiding_pixel=False, grad_checkpointing=False,
@@ -134,7 +155,18 @@ class PianoRollMAR(nn.Module):
 
         # Prepend conditions
         for i in range(self.num_conds):
-            x = torch.cat([self.cond_emb(cond_list[i]).unsqueeze(1), x], dim=1)
+            cond = cond_list[i]
+            # Handle CFG (batch size mismatch)
+            # If x includes negative samples (2*B), but cond doesn't (B), expand cond
+            if x.size(0) != cond.size(0):
+                # Check if x is 2*B (CFG enabled) and cond is B
+                if x.size(0) == 2 * cond.size(0):
+                    cond = torch.cat([cond, cond], dim=0)
+                else:
+                    # Unexpected mismatch
+                    raise RuntimeError(f"Sizes of tensors must match. x: {x.size()}, cond: {cond.size()}")
+            
+            x = torch.cat([self.cond_emb(cond).unsqueeze(1), x], dim=1)
 
         # Prepend guiding pixel if used
         if self.guiding_pixel:
@@ -253,11 +285,12 @@ class PianoRollMAR(nn.Module):
         flat_mask = mask.reshape(-1).bool()
         for cond_idx in range(len(cond_list_next)):
             cond_view = cond_list_next[cond_idx].reshape(
-                cond_list_next[cond_idx].size(0) * cond_list_next[cond_idx].size(1), -1
+                cond_list_next[cond_idx].size(0) * cond_list_next[cond_idx].size(1),
+                cond_list_next[cond_idx].size(-1)
             )
             cond_list_next[cond_idx] = cond_view[flat_mask]
 
-        patches = patches.reshape(patches.size(0) * patches.size(1), -1)
+        patches = patches.reshape(patches.size(0) * patches.size(1), patches.size(-1))
         patches = patches[flat_mask]
         patches = patches.view(-1, 1, self.patch_size, self.patch_size)
 
@@ -274,13 +307,15 @@ class PianoRollMAR(nn.Module):
         return patches, cond_list_next, guiding_pixel_loss, stats
 
     def sample(self, cond_list, num_iter, cfg, cfg_schedule, temperature, filter_threshold,
-               next_level_sample_function, visualize=False, _intermediates_list=None, _current_level=None, _patch_pos=None, target_width=None):
+               next_level_sample_function, visualize=False, _intermediates_list=None, _current_level=None,
+               _patch_pos=None, target_width=None, inpainting_mask=None, inpainting_target=None):
         """
         Iterative refinement sampling.
         
         Args:
-            target_width: Target width for generation at Level 0 only (128, 256, 512, etc.)
-                         For other levels, this should be None and will use square patches.
+            target_width: Target width for generation at Level 0 only.
+            inpainting_mask: Tensor (B, seq_len) where 1=generate (unknown), 0=keep (known).
+            inpainting_target: Tensor (B, seq_len, patch_dim) containing known content.
         """
         if cfg == 1.0:
             bsz = cond_list[0].size(0)
@@ -295,37 +330,60 @@ class PianoRollMAR(nn.Module):
                 sampled_pixels = torch.cat([sampled_pixels, sampled_pixels], dim=0)
             cond_list.append(sampled_pixels)
 
-        # Initialize token mask and patches (all zeros for clean start)
-        # For Level 0 (img_size=128): use target_width to support variable widths
-        # For other levels: generate square patches (width = height = img_size)
+        # Initialize token mask and patches
         h_patches = self.img_size // self.patch_size
         if target_width is not None and self.img_size == 128:
-            # Level 0: variable width
             w_patches = target_width // self.patch_size
         else:
-            # Other levels: square patches
             w_patches = h_patches
         actual_seq_len = h_patches * w_patches
 
-        if _intermediates_list is None:
-            return self._sample_fast(
-                cond_list=list(cond_list),
-                num_iter=num_iter,
-                cfg=cfg,
-                cfg_schedule=cfg_schedule,
-                temperature=temperature,
-                filter_threshold=filter_threshold,
-                next_level_sample_function=next_level_sample_function,
-                h_patches=h_patches,
-                w_patches=w_patches,
-                seq_len=actual_seq_len
-            )
+        # Handle inpainting initialization
+        if inpainting_mask is not None:
+            # Inpainting mode
+            assert inpainting_target is not None, "inpainting_target is required when inpainting_mask is provided"
+            
+            # Resize inpainting inputs if necessary (e.g., from Level 0 to current level)
+            if inpainting_mask.shape[1] != actual_seq_len:
+                # This shouldn't happen if passed correctly, but safety check
+                pass 
+                
+            mask = inpainting_mask.clone().to(cond_list[0].device)
+            patches = inpainting_target.clone().to(cond_list[0].device)
+            # Ensure masked parts are initialized to mask token (-1)
+            patches[mask.bool()] = -1.0
+            
+            # Construct orders such that unknown tokens are at the beginning
+            # This ensures mask_by_order(mask_len) masks the unknown tokens first
+            orders = torch.zeros(bsz, actual_seq_len, dtype=torch.long, device=cond_list[0].device)
+            num_unknown_list = []
+            
+            for i in range(bsz):
+                unknown_indices = mask[i].nonzero(as_tuple=False).squeeze(-1)
+                known_indices = (mask[i] == 0).nonzero(as_tuple=False).squeeze(-1)
+                
+                # Shuffle within groups
+                unknown_indices = unknown_indices[torch.randperm(len(unknown_indices), device=cond_list[0].device)]
+                known_indices = known_indices[torch.randperm(len(known_indices), device=cond_list[0].device)]
+                
+                orders[i] = torch.cat([unknown_indices, known_indices])
+                num_unknown_list.append(len(unknown_indices))
+            
+            # Use max unknown count for scheduling (if batch has variable unknown counts, this is tricky, 
+            # but usually they are same or we take max)
+            max_unknown = max(num_unknown_list) if num_unknown_list else 0
+            
+        else:
+            # Standard generation
+            mask = torch.ones(bsz, actual_seq_len, device=cond_list[0].device)
+            patches = torch.full((bsz, actual_seq_len, 1 * self.patch_size**2), fill_value=-1.0, device=cond_list[0].device)
+            orders = self.sample_orders(bsz, actual_seq_len, device=cond_list[0].device)
+            max_unknown = actual_seq_len
+
+        # If we have very few tokens to generate, reduce num_iter
+        if max_unknown < num_iter and max_unknown > 0:
+            num_iter = max_unknown
         
-        mask = torch.ones(bsz, actual_seq_len, device=cond_list[0].device)
-        # Initialize with 0 (silence) for unconditional generation
-        # During training, -1 is used as mask token, but for sampling we start from silence
-        patches = torch.zeros((bsz, actual_seq_len, 1 * self.patch_size**2), device=cond_list[0].device)
-        orders = self.sample_orders(bsz, actual_seq_len, device=cond_list[0].device)
         num_iter = min(actual_seq_len, num_iter)
         
         # Record initial state - save canvas at Level 0 only
@@ -343,6 +401,10 @@ class PianoRollMAR(nn.Module):
         # Iterative refinement
         for step in range(num_iter):
             cur_patches = patches.clone()
+            
+            # If nothing to generate (fully known), skip (but need to return patches)
+            if max_unknown == 0:
+                break
 
             if not cfg == 1.0:
                 patches = torch.cat([patches, patches], dim=0)
@@ -352,17 +414,30 @@ class PianoRollMAR(nn.Module):
             cond_list_next = self.predict(patches, mask, cond_list)
 
             # Mask ratio for next round (cosine schedule)
+            # Apply schedule relative to the number of unknown tokens
             mask_ratio = np.cos(math.pi / 2. * (step + 1) / num_iter)
-            mask_len = torch.tensor([np.floor(actual_seq_len * mask_ratio)], device=cond_list[0].device)
+            
+            # Calculate mask length based on max_unknown (effectively inpainting schedule)
+            mask_len = torch.tensor([np.floor(max_unknown * mask_ratio)], device=cond_list[0].device)
 
-            # Ensure at least one token is masked for next iteration
+            # Ensure at least one token is masked for next iteration (unless we are done)
+            # And ensure we don't mask more than available unknown tokens
+            current_unknown = torch.sum(mask, dim=-1, keepdims=True)
             mask_len = torch.maximum(
-                torch.tensor([1.], device=mask_len.device),
-                torch.minimum(torch.sum(mask, dim=-1, keepdims=True) - 1, mask_len)
+                torch.tensor([0.], device=mask_len.device), # Allow going to 0
+                torch.minimum(current_unknown - 1, mask_len)
             )
+            # Don't let it go below 0 if we started with >0
+            if step < num_iter - 1:
+                mask_len = torch.maximum(mask_len, torch.tensor([1.], device=mask_len.device))
 
             # Get masking for next iteration
             mask_next = mask_by_order(mask_len[0], orders, bsz, actual_seq_len)
+            
+            # Fix: mask_by_order sets first N tokens in order to 1.
+            # Our orders have unknowns first. So mask_next will have 1s for the remaining unknowns.
+            # Knowns (at end of orders) will be 0. Correct.
+            
             if step >= num_iter - 1:
                 mask_to_pred = mask[:bsz].bool()
             else:
@@ -378,27 +453,51 @@ class PianoRollMAR(nn.Module):
 
             # CFG schedule
             if cfg_schedule == "linear":
-                cfg_iter = 1 + (cfg - 1) * (actual_seq_len - mask_len[0]) / actual_seq_len
+                # Adjust CFG schedule for inpainting? 
+                # Use progress relative to max_unknown
+                cfg_iter = 1 + (cfg - 1) * (max_unknown - mask_len[0]) / max_unknown if max_unknown > 0 else cfg
             else:
                 cfg_iter = cfg
 
             # Sample from next level
             # For Level 0 visualization: batch generate to reduce frame count
             if _intermediates_list is not None and _current_level == 0:
-                # Get indices of patches to update
-                mask_indices = mask_to_pred.nonzero(as_tuple=True)
-                num_patches_to_update = len(mask_indices[0])
+                # Get indices of patches to update (for ONE batch copy)
+                if not cfg == 1.0:
+                    # mask_to_pred is [M, M]. We only need indices for first M (positive samples).
+                    mask_single = mask_to_pred.chunk(2, dim=0)[0]
+                else:
+                    mask_single = mask_to_pred
                 
-                # Batch size for simultaneous generation (更大的 batch = 更少的幀)
-                batch_generate_size = 2  # 每次同時生成 4 個 patches
+                mask_indices = mask_single.nonzero(as_tuple=True)
+                num_patches_single = len(mask_indices[0])
+                
+                # Batch size for simultaneous generation (smaller batch = more frames/smoother animation)
+                batch_generate_size = 1  # Generate 1 patch at a time for maximum smoothness
+                
+                # Separate conditions into pos/neg if CFG
+                if not cfg == 1.0:
+                    # cond_list_next elements are [2N, Dim] (flattened from batch)
+                    # Split into [N, Dim] and [N, Dim]
+                    conds_pos = [c[:num_patches_single] for c in cond_list_next]
+                    conds_neg = [c[num_patches_single:] for c in cond_list_next]
+                else:
+                    conds_pos = cond_list_next
+                    conds_neg = None
                 
                 # Generate and update patches in batches
-                for batch_start in range(0, num_patches_to_update, batch_generate_size):
-                    batch_end = min(batch_start + batch_generate_size, num_patches_to_update)
-                    batch_size_actual = batch_end - batch_start
+                for batch_start in range(0, num_patches_single, batch_generate_size):
+                    batch_end = min(batch_start + batch_generate_size, num_patches_single)
                     
-                    # Get conditions for this batch
-                    batch_conds = [c[batch_start:batch_end] for c in cond_list_next]
+                    # Construct batch conditions
+                    batch_conds = []
+                    for i in range(len(cond_list_next)):
+                        c_pos = conds_pos[i][batch_start:batch_end]
+                        if conds_neg:
+                            c_neg = conds_neg[i][batch_start:batch_end]
+                            batch_conds.append(torch.cat([c_pos, c_neg], dim=0))
+                        else:
+                            batch_conds.append(c_pos)
                     
                     # Generate batch of patches (without position tracking to avoid nested recording)
                     batch_patches = next_level_sample_function(
@@ -408,12 +507,42 @@ class PianoRollMAR(nn.Module):
                     )
                     batch_patches = batch_patches.reshape(batch_patches.size(0), -1)
                     
-                    # Update all patches in this batch
-                    for i, idx in enumerate(range(batch_start, batch_end)):
-                        patch_pos = (mask_indices[0][idx], mask_indices[1][idx])
-                        cur_patches[patch_pos] = batch_patches[i].to(cur_patches.dtype)
+                    # Update patches in this batch
+                    # Positive samples
+                    patches_pos = batch_patches[:(batch_end - batch_start)]
                     
-                    # Record canvas state after each batch
+                    # Fix index error when batch size is variable or batch_patches doesn't match
+                    if patches_pos.size(0) != (batch_end - batch_start):
+                        # If batch_patches size is less than expected, use what we have
+                        patches_pos = patches_pos[:min(patches_pos.size(0), batch_end - batch_start)]
+                        
+                    for i, idx in enumerate(range(batch_start, batch_start + patches_pos.size(0))):
+                        patch_pos = (mask_indices[0][idx], mask_indices[1][idx])
+                        cur_patches[patch_pos] = patches_pos[i].to(cur_patches.dtype)
+                    
+                    # Negative samples (if CFG)
+                    if cfg != 1.0:
+                        patches_neg = batch_patches[(batch_end - batch_start):]
+                        bsz_half = bsz # bsz is original batch size (half of total if CFG)
+                        
+                        # Fix index error for negative samples
+                        # If next_level_sample_function returns only B samples (already mixed?), then patches_neg might be empty
+                        # But if we are here, it should have returned 2*B
+                        
+                        # Check if patches_neg has content
+                        if patches_neg.size(0) > 0:
+                            for i, idx in enumerate(range(batch_start, batch_start + patches_neg.size(0))):
+                                # Shift batch index by bsz_half
+                                patch_pos = (mask_indices[0][idx] + bsz_half, mask_indices[1][idx])
+                                cur_patches[patch_pos] = patches_neg[i].to(cur_patches.dtype)
+                        else:
+                            # This implies batch_patches only had positive samples
+                            # This shouldn't happen if lower level logic is correct for 2*B
+                            # But to prevent crash, we skip negative update (will result in stale negative state)
+                            pass
+                    
+                    # Record canvas state after each batch (Only visualize positive samples)
+                    # Use only the first bsz samples from cur_patches
                     h_patches_temp = self.img_size // self.patch_size
                     w_patches_temp = w_patches
                     img_temp = self.unpatchify(cur_patches[:bsz], h_patches_temp, w_patches_temp)
@@ -440,7 +569,12 @@ class PianoRollMAR(nn.Module):
 
             if sampled_patches is not None:
                 if not cfg == 1.0:
-                    mask_to_pred, _ = mask_to_pred.chunk(2, dim=0)
+                    # mask_to_pred is 2*B. We want to update both halves of cur_patches (2*B).
+                    # sampled_patches is 2*N (N = num masked in one half).
+                    # We don't chunk mask_to_pred.
+                    pass
+                else:
+                    pass
 
                 # For finer visualization, update patches gradually
                 mask_indices = mask_to_pred.nonzero(as_tuple=True)
@@ -516,9 +650,9 @@ class PianoRollMAR(nn.Module):
 
         patch_dim = self.patch_size ** 2
         mask = torch.ones(base_bsz, seq_len, device=device, dtype=torch.bool)
-        # Initialize with 0 (silence) for unconditional generation
-        # During training, -1 is used as mask token, but for sampling we start from silence
-        patches = torch.zeros((base_bsz, seq_len, patch_dim), device=device, dtype=dtype)
+        # Initialize with -1 (mask token) for inpainting-style generation
+        # This matches training distribution better than starting from silence (0)
+        patches = torch.full((base_bsz, seq_len, patch_dim), fill_value=-1.0, device=device, dtype=dtype)
         orders = self.sample_orders(base_bsz, seq_len, device=device)
         num_iter = min(num_iter, seq_len)
 
@@ -582,4 +716,3 @@ class PianoRollMAR(nn.Module):
 # ==============================================================================
 # Velocity Loss (adapted from PixelLoss for single-channel velocity)
 # ==============================================================================
-

@@ -1,0 +1,42 @@
+# Docker Compose configuration for FractalMIDI
+
+version: '3.8'
+
+services:
+  fractalmidi:
+    build: .
+    container_name: fractalmidi-web
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./dataset:/app/dataset
+      - ./web/outputs:/app/web/outputs
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    command: python web/backend/app.py
+
+  # Optional: nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: fractalmidi-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./web/frontend/static:/usr/share/nginx/html:ro
+    depends_on:
+      - fractalmidi
+    restart: unless-stopped
+

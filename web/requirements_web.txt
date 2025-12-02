@@ -1,0 +1,23 @@
+# Web Application Requirements for FractalMIDI
+
+# FastAPI and server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+websockets==12.0
+
+# Async support
+aiofiles==23.2.1
+
+# Existing FractalMIDI dependencies (should already be installed)
+# torch>=2.0.0
+# pytorch-lightning>=2.0.0
+# symusic
+# numpy
+# pillow
+# matplotlib
+
+# Additional for web
+pydantic==2.5.0
+python-jose[cryptography]==3.3.0  # For authentication if needed
+

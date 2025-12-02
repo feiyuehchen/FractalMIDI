@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 from model import fractalmar_piano
 from visualizer import log_piano_roll_to_tensorboard
@@ -58,6 +59,7 @@ class ModelConfig:
     scan_order: str = 'row_major'
     mask_ratio_loc: float = 1.0  # Mean mask ratio for MAR (1.0 = mask 100%, 0.5 = mask 50%)
     mask_ratio_scale: float = 0.5  # Standard deviation of mask ratio
+    ar_prefix_mask_ratio: float = 1.0  # Maximum prefix mask ratio for AR training (1.0 = can mask up to 100%)
 
     def __post_init__(self):
         allowed = {"mar", "ar"}
@@ -148,7 +150,8 @@ class FractalMIDILightningModule(pl.LightningModule):
             generator_type_list=model_cfg.generator_type_list,
             scan_order=model_cfg.scan_order,
             mask_ratio_loc=model_cfg.mask_ratio_loc,
-            mask_ratio_scale=model_cfg.mask_ratio_scale
+            mask_ratio_scale=model_cfg.mask_ratio_scale,
+            ar_prefix_mask_ratio=model_cfg.ar_prefix_mask_ratio
         )
         return model
     
@@ -168,6 +171,13 @@ class FractalMIDILightningModule(pl.LightningModule):
             piano_rolls = piano_rolls.unsqueeze(1)
         
         # FractalGen forward computes loss recursively through all levels
+        # Note on OOM: The batch size expands at each level of the hierarchy.
+        # Level 0: B
+        # Level 1: B * (128/16)^2 = B * 64
+        # Level 2: B * 64 * (16/4)^2 = B * 1024
+        # Level 3: B * 1024 * (4/1)^2 = B * 16384
+        # With B=8, Level 3 processes ~131k items.
+        # Use grad_checkpointing=True in config to save memory at cost of compute.
         loss, stats = self.model(piano_rolls)
         
         return loss, stats
@@ -227,6 +237,13 @@ class FractalMIDILightningModule(pl.LightningModule):
                 and self.global_step > 0
                 and self.global_step % self.config.log_images_every_n_steps == 0
             )
+            
+            # Also log if this is a validation step triggered by val_check_interval_steps
+            # Because validation happens based on batches (via val_check_interval), 
+            # but global_step is updated based on accumulated grad batches.
+            # If val_check_interval_steps (batches) is consistent with log_images_every_n_steps (steps),
+            # we should ensure we log when validation happens.
+            
             if should_log_images:
                 self._log_images(batch, batch_idx, 'val', force_sample=True)
         
@@ -280,21 +297,26 @@ class FractalMIDILightningModule(pl.LightningModule):
         
         self._last_logged_image_step = self.global_step
         
-        # Log ground truth (every time we log, not just once)
-        for i in range(num_to_log):
-            roll = piano_rolls[i]
-            if roll.dim() == 3:
-                roll = roll.squeeze(0)
-            try:
-                log_piano_roll_to_tensorboard(
-                    self.logger.experiment,
-                    f'{split}/ground_truth/step_{self.global_step:07d}_sample_{i}',
-                    roll.detach().cpu(),
-                    self.global_step,
-                    apply_colormap=True
-                )
-            except Exception as exc:
-                print(f"Warning: Failed to log ground truth {i}: {exc}")
+        # Log ground truth (only once, not every validation)
+        # Check if ground truth has been logged before
+        if not hasattr(self, '_ground_truth_logged') or not self._ground_truth_logged:
+            for i in range(num_to_log):
+                roll = piano_rolls[i]
+                if roll.dim() == 3:
+                    roll = roll.squeeze(0)
+                try:
+                    log_piano_roll_to_tensorboard(
+                        self.logger.experiment,
+                        f'{split}_images/0_ground_truth/sample_{i}',  # Better organization, no step number
+                        roll.detach().cpu(),
+                        self.global_step,
+                        apply_colormap=True
+                    )
+                except Exception as exc:
+                    print(f"Warning: Failed to log ground truth {i}: {exc}")
+            
+            # Mark as logged
+            self._ground_truth_logged = True
 
         # Generate and log samples with intermediates for GIF
         samples_to_generate = num_to_log
@@ -334,7 +356,7 @@ class FractalMIDILightningModule(pl.LightningModule):
             try:
                 log_piano_roll_to_tensorboard(
                     self.logger.experiment,
-                    f'{split}/generated/step_{self.global_step:07d}_sample_{i}',
+                    f'{split}_images/1_generated_step_{self.global_step:07d}/sample_{i}',  # Group by step
                     roll,
                     self.global_step,
                     apply_colormap=True
@@ -347,94 +369,57 @@ class FractalMIDILightningModule(pl.LightningModule):
             self._create_generation_gifs(intermediates, samples_to_generate, split)
 
     def _create_generation_gifs(self, intermediates, num_samples, split='val'):
-        """Create GIF animations from generation intermediates."""
+        """Create GIF animations from generation intermediates using growth animation."""
         try:
+            from visualizer import create_growth_animation
+            import os
             import numpy as np
-            from PIL import Image
-            import io
             
-            # intermediates is a list of tensors, each representing a generation step
-            # Each tensor has shape (batch_size, 1, H, W) or (batch_size, H, W)
+            gif_dir = os.path.join(self.logger.log_dir, 'generation_gifs')
+            os.makedirs(gif_dir, exist_ok=True)
             
-            for sample_idx in range(num_samples):
-                frames = []
-                
-                for step_idx, intermediate in enumerate(intermediates):
-                    # Extract single sample
-                    if torch.is_tensor(intermediate):
-                        intermediate = intermediate.detach().cpu()
-                        if intermediate.dim() == 4:
-                            frame = intermediate[sample_idx].squeeze(0)  # (H, W)
-                        elif intermediate.dim() == 3:
-                            frame = intermediate[sample_idx]  # (H, W)
-                        else:
-                            continue
-                    else:
-                        continue
-                    
-                    # Convert to numpy
-                    frame_np = frame.numpy()
-                    
-                    # Normalize from [-1, 1] to [0, 255]
-                    # -1 (white/silence) -> 0, 1 (loud/black) -> 255
-                    frame_np = ((frame_np + 1.0) / 2.0 * 255)
-                    frame_np = np.clip(frame_np, 0, 255).astype(np.uint8)
-                    
-                    # Apply colormap (viridis)
-                    # Create RGB image
-                    from matplotlib import cm
-                    colormap = cm.get_cmap('viridis')
-                    frame_colored = colormap(frame_np / 255.0)
-                    frame_rgb = (frame_colored[:, :, :3] * 255).astype(np.uint8)
-                    
-                    # Convert to PIL Image
-                    pil_img = Image.fromarray(frame_rgb)
-                    
-                    # Resize for better viewing (optional)
-                    # pil_img = pil_img.resize((pil_img.width * 2, pil_img.height * 2), Image.NEAREST)
-                    
-                    frames.append(pil_img)
-                
-                if len(frames) == 0:
-                    continue
-                
-                # Save GIF to memory buffer
-                buf = io.BytesIO()
-                frames[0].save(
-                    buf,
-                    format='GIF',
-                    append_images=frames[1:],
-                    save_all=True,
-                    duration=200,  # milliseconds per frame
-                    loop=0  # infinite loop
-                )
-                buf.seek(0)
-                
-                # Save GIF to disk for viewing
-                try:
-                    gif_data = buf.getvalue()
-                    
-                    # Save to disk (TensorBoard doesn't directly support GIF animation viewing)
-                    import os
-                    gif_dir = os.path.join(self.logger.log_dir, 'generation_gifs')
-                    os.makedirs(gif_dir, exist_ok=True)
-                    gif_path = os.path.join(gif_dir, f'step_{self.global_step:07d}_sample_{sample_idx}.gif')
-                    
-                    with open(gif_path, 'wb') as f:
-                        f.write(gif_data)
-                    
+            # Note: AR generator only records the first sample (sample_idx=0)
+            # So we can only visualize sample 0
+            
+            sample_frames = []
+            
+            # Extract frames for sample 0
+            for item in intermediates:
+                if isinstance(item, dict) and 'output' in item:
+                    # output is (1, C, H, W) or similar for AR
+                    frame = item['output']
+                    if isinstance(frame, torch.Tensor):
+                        if frame.ndim == 4: frame = frame[0] # (C, H, W)
+                        if frame.ndim == 3: frame = frame[0] # (H, W) if C=1
+                        sample_frames.append(frame)
+                elif isinstance(item, torch.Tensor):
+                    # Legacy/other models
+                    frame = item
+                    if frame.ndim == 4: frame = frame[0] # Take first sample
+                    sample_frames.append(frame)
+
+            if not sample_frames:
+                return
+
+            # Generate GIF for sample 0
+            gif_path = os.path.join(gif_dir, f'step_{self.global_step:07d}_sample_0.gif')
+            
+            # Create smooth animation with improved quality and easing
+            frames = create_growth_animation(
+                sample_frames,
+                save_path=gif_path,
+                fps=24,  # Slightly higher FPS for smoother animation
+                transition_duration=0.15,  # Longer transitions for smoother effect
+                min_height=512,  # Higher resolution
+                easing="ease_in_out_cubic",  # Smooth easing
+                pop_effect=True,  # Enable note-popping effect
+                optimize=True,
+                quality=90
+            )
+            
+            if frames is None:
+                # Saved successfully
                     print(f"Saved generation GIF: {gif_path}")
-                    
-                    # Also log the final frame to TensorBoard as a preview
-                    self.logger.experiment.add_image(
-                        f'{split}/generation_preview/step_{self.global_step:07d}_sample_{sample_idx}',
-                        np.array(frames[-1]).transpose(2, 0, 1),  # Last frame as thumbnail
-                        self.global_step,
-                        dataformats='CHW'
-                    )
-                    
-                except Exception as e:
-                    print(f"Warning: Failed to log GIF for sample {sample_idx}: {e}")
                 
         except Exception as exc:
             print(f"Warning: Failed to create generation GIFs: {exc}")
@@ -655,10 +640,8 @@ class FractalMIDILightningModule(pl.LightningModule):
         # Add label text
         if label:
             draw = ImageDraw.Draw(frame_pil)
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
-            except:
-                font = ImageFont.load_default()
+
+            font = ImageFont.load_default()
             
             # Add background for text
             text_bbox = draw.textbbox((0, 0), label, font=font)
@@ -708,7 +691,11 @@ def create_trainer(config: FractalTrainerConfig, *, val_check_interval: float | 
     }
 
     if val_check_interval is None:
-        default_args['val_check_interval'] = min(1.0, max(0.0, config.val_check_interval_steps / max(1, config.max_steps)))
+        # Convert global steps to batches for Lightning
+        # val_check_interval in int means batches
+        # global_step = batch_idx // accumulate_grad_batches
+        # So we need val_check_interval_steps * accumulate_grad_batches batches
+        default_args['val_check_interval'] = int(config.val_check_interval_steps * config.accumulate_grad_batches)
     else:
         default_args['val_check_interval'] = val_check_interval
 
@@ -716,6 +703,22 @@ def create_trainer(config: FractalTrainerConfig, *, val_check_interval: float | 
     
     # Merge with user-provided arguments
     trainer_args = {**default_args, **trainer_kwargs}
+    
+    # Configure ModelCheckpoint callback if not present
+    checkpoint_callback = ModelCheckpoint(
+        every_n_train_steps=config.checkpoint_every_n_steps,
+        save_top_k=config.save_top_k,
+        monitor='val_loss',
+        mode='min',
+        filename='step_{step:08d}-val_loss_{val_loss:.4f}',
+        save_last=True,
+        save_on_train_epoch_end=False  # Crucial for saving based on steps not epochs
+    )
+    
+    callbacks = trainer_args.get('callbacks', [])
+    if not any(isinstance(cb, ModelCheckpoint) for cb in callbacks):
+        callbacks.append(checkpoint_callback)
+    trainer_args['callbacks'] = callbacks
     
     # Disable distributed sampler (we use custom BucketBatchSampler)
     trainer_args['use_distributed_sampler'] = False

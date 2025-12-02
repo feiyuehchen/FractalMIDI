@@ -63,6 +63,7 @@ class GeneratorConfig:
     
     # AR generator settings
     scan_order: str = "row_major"        # Options: "row_major", "column_major"
+    ar_prefix_mask_ratio: float = 1.0    # Max prefix mask ratio for AR training (1.0 = can mask 100%)
     
     # MAR generator settings
     mask_ratio_loc: float = 1.0          # Mean mask ratio (1.0 = 100%, 0.5 = 50%)
