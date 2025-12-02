@@ -65,43 +65,46 @@ class TimePositionalEmbedding(nn.Module):
 class FractalInputProj(nn.Module):
     """
     Project Piano Roll (B, 2, T, 128) -> (B, T, E).
-    Uses an intermediate Pitch Embedding Layer to capture harmonic relationships.
+    Uses Conv2d over Pitch axis to capture harmonic relationships (intervals) invariantly.
     """
     def __init__(self, in_channels, embed_dim):
         super().__init__()
-        # Input: (B, 2, T, 128). Flattened to (B, T, 256) usually.
-        # Improved: Project 128 Pitch dim first?
-        # Critique Suggestion: Pitch Embedding Layer.
-        # "Don't just throw 128 pitches into Conv1d."
-        # "Use a shared weight Linear or small Conv1d on Pitch axis."
+        # Input: (B, 2, T, 128)
+        # We treat it as image: (B, C=2, H=128, W=T)
+        # We want to convolve over Pitch (H) with Time (W) local or global?
+        # Professor says: "2D Conv (Kernel size=[1, 12]) to sweep Pitch axis".
+        # Kernel (12, 1) means 12 semitones (octave) and 1 time step.
         
-        # Approach:
-        # 1. Treat (2, 128) as features per time step.
-        # 2. Flatten to (B, T, 256).
-        # 3. Dense projection to higher dim (e.g. 512) to allow "wiggle room".
-        # 4. Then mix.
-        
-        # Let's implement the "Pitch Embedding" idea more explicitly.
-        # We process the (2, 128) block at each timestep.
-        # Let's use a Linear layer that maps (2*128) -> embed_dim.
-        # But add a hidden layer to capture interactions?
-        # Critique says: "at least add a Dense layer... to project to higher dim"
-        
-        self.pitch_mlp = nn.Sequential(
-            nn.Linear(in_channels * 128, embed_dim * 2),
+        self.pitch_conv = nn.Sequential(
+            # Conv2d(in_channels, out_channels, kernel_size, stride, padding)
+            # Input: (B, 2, 128, T) - Note the permute needed
+            # Kernel: (12, 1) -> Captures octave relationships per time step
+            nn.Conv2d(in_channels, 32, kernel_size=(12, 1), stride=(1, 1), padding=(6, 0)),
             nn.GELU(),
-            nn.Linear(embed_dim * 2, embed_dim)
+            nn.Conv2d(32, 32, kernel_size=(12, 1), stride=(1, 1), padding=(5, 0)), # More receptive field
+            nn.GELU(),
         )
+        
+        # Output of conv: (B, 32, 128, T)
+        # Flatten Pitch: (B, 32*128, T)
+        self.proj = nn.Conv1d(32 * 128, embed_dim, kernel_size=1)
         
         self.pos_emb = TimePositionalEmbedding(embed_dim)
 
     def forward(self, x):
         # x: (B, 2, T, 128)
-        B, C, T, P = x.shape
-        # Permute to (B, T, C*P) -> (B, T, 256)
-        x = x.permute(0, 2, 1, 3).reshape(B, T, C * P) 
+        # Permute to (B, 2, 128, T) for Conv2d (Batch, Channel, Height=Pitch, Width=Time)
+        x = x.permute(0, 1, 3, 2) 
         
-        x = self.pitch_mlp(x) # (B, T, E)
+        x = self.pitch_conv(x) # (B, 32, 128, T)
+        
+        B, C, P, T = x.shape
+        # Reshape to (B, C*P, T) -> (B, 32*128, T)
+        x = x.reshape(B, C * P, T)
+        
+        x = self.proj(x) # (B, E, T)
+        x = x.permute(0, 2, 1) # (B, T, E)
+        
         x = x + self.pos_emb(x)
         return x
 
@@ -151,22 +154,66 @@ class StructureOutputProj(nn.Module):
         x = x.permute(0, 2, 1) # (B, 2, T)
         return x
 
+    def forward(self, x, cond=None):
+        # x: (B, T, E)
+        # cond: (B, T, C) or (B, C)
+        
+        # Residual Block 1: Norm -> AdaLN Modulate -> Attn
+        residual = x
+        x = self.norm1(x) # Standard LayerNorm
+        if self.use_adaln:
+            x = self.adaln1_mod(x, cond) # Modulate normalized features
+        x = self.attn(x)
+        x = residual + x
+        
+        # Residual Block 2: Norm -> AdaLN Modulate -> MLP
+        residual = x
+        x = self.norm2(x)
+        if self.use_adaln:
+            x = self.adaln2_mod(x, cond)
+        x = self.mlp(x)
+        x = residual + x
+            
+        return x
+
+class AdaLNModulator(nn.Module):
+    """
+    AdaLN Modulator only (Scale & Shift).
+    Assumes input is already normalized.
+    """
+    def __init__(self, embed_dim, cond_dim):
+        super().__init__()
+        self.proj = nn.Linear(cond_dim, embed_dim * 2)
+        # Zero-init to start as Identity
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias) 
+        # We want scale to start at 0 (so 1+scale = 1) and shift at 0.
+        # Or scale at 1 and shift at 0? 
+        # If we do x * (1+scale) + shift, then scale=0 is identity.
+        
+    def forward(self, x, cond):
+        # x: (B, T, E)
+        if cond.dim() == 2:
+            cond = cond.unsqueeze(1)
+            
+        scale_shift = self.proj(cond)
+        scale, shift = scale_shift.chunk(2, dim=-1)
+        
+        # Modulation: x * (1 + scale) + shift
+        x = x * (1 + scale) + shift
+        return x
+
 class FractalBlock(nn.Module):
-    """
-    Transformer Block with Time Attention and AdaLN.
-    Modified to use AdaLN for Tempo/Structure conditioning.
-    """
     def __init__(self, embed_dim, num_heads, mlp_ratio=4.0, dropout=0.0, cond_dim=None):
         super().__init__()
-        # Always use AdaLN if cond_dim is provided
         self.use_adaln = cond_dim is not None
         
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        
         if self.use_adaln:
-            self.norm1 = AdaLN(embed_dim, cond_dim)
-            self.norm2 = AdaLN(embed_dim, cond_dim)
-        else:
-            self.norm1 = nn.LayerNorm(embed_dim)
-            self.norm2 = nn.LayerNorm(embed_dim)
+            self.adaln1_mod = AdaLNModulator(embed_dim, cond_dim)
+            self.adaln2_mod = AdaLNModulator(embed_dim, cond_dim)
             
         self.attn = Attention(embed_dim, num_heads=num_heads, qkv_bias=True, attn_drop=dropout, proj_drop=dropout)
         
@@ -178,32 +225,6 @@ class FractalBlock(nn.Module):
             nn.Dropout(dropout)
         )
         self.cond_dim = cond_dim
-
-    def forward(self, x, cond=None):
-        # x: (B, T, E)
-        # cond: (B, T, C) or (B, C) - Conditioning signal (Tempo/Structure)
-        
-        residual = x
-        
-        if self.use_adaln:
-            x = self.norm1(x, cond)
-        else:
-            x = self.norm1(x)
-            
-        x = self.attn(x)
-        x = residual + x
-        
-        residual = x
-        
-        if self.use_adaln:
-            x = self.norm2(x, cond)
-        else:
-            x = self.norm2(x)
-            
-        x = self.mlp(x)
-        x = residual + x
-            
-        return x
 
 class TemporalGenerator(nn.Module):
     """
@@ -276,8 +297,11 @@ class TemporalGenerator(nn.Module):
         return logits, x_emb
 
 class FractalLoss(nn.Module):
-    def forward(self, pred, target, mask):
+    def forward(self, pred, target, mask, weights=None):
         # mask: [Batch, Time]
+        # weights: Dict with 'tempo' weight
+        
+        tempo_weight = weights.get('tempo', 1.0) if weights else 1.0
         
         if pred.dim() == 3: # Structure Level (B, 2, T)
             # Ch0: Density (MSE)
@@ -289,7 +313,7 @@ class FractalLoss(nn.Module):
             loss_density = (loss_density * mask).sum() / (mask.sum() + 1e-6)
             loss_tempo = (loss_tempo * mask).sum() / (mask.sum() + 1e-6)
             
-            return loss_density + loss_tempo
+            return loss_density + tempo_weight * loss_tempo
             
         else: # Content Level (B, 2, T, 128)
             # Ch0: Note (BCEWithLogits)
@@ -424,10 +448,11 @@ class TemporalFractalNetwork(nn.Module):
         emb_up = F.interpolate(emb_perm, size=target_len, mode='linear', align_corners=False)
         return emb_up.permute(0, 2, 1)
 
-    def forward(self, notes, tempo, density, global_cond=None):
+    def forward(self, notes, tempo, density, global_cond=None, loss_weights=None):
         # notes: (B, 2, T, 128)
         # tempo: (B, T)
         # density: (B, T)
+        # loss_weights: Dict
         
         stats = {}
         total_loss = 0
@@ -440,20 +465,10 @@ class TemporalFractalNetwork(nn.Module):
             # Prepare GT
             if i == 0: # Structure Level
                 gt = self._downsample_structure(density, tempo, factor) # (B, 2, T_low)
-                # For L0, we condition on nothing (or global_cond)
                 level_cond = global_cond
                 
             else: # Content Level
                 gt = self._downsample_content(notes, factor) # (B, 2, T_low, 128)
-                
-                # CRITICAL FIX:
-                # Pass Tempo/Structure as side-condition via AdaLN, NOT as input channel.
-                # We need the Structure info for this level.
-                # We have 'prev_level_emb' which is the embedding of L0 (Structure).
-                # This contains the Structure info!
-                # In previous iteration we used `cond_projs` to project `prev_level_emb` to `cond_emb`.
-                # That `cond_emb` IS the Structure condition.
-                # So we just pass that as `cond`.
                 level_cond = None # Will be set via cond_emb logic below
             
             B = gt.shape[0]
@@ -470,18 +485,16 @@ class TemporalFractalNetwork(nn.Module):
                 cond_emb = self.cond_projs[i](upsampled) # (B, T, E_curr)
                 level_cond = cond_emb # Use structure embedding as condition
             elif i == 0:
-                # Level 0 has no previous level, use global_cond if available
                 level_cond = global_cond
 
             # Forward
-            # Note: we pass 'level_cond' as the 'cond' argument to TemporalGenerator
             logits, x_emb = level_mod(gt, level_cond, mask, None)
             
             # Store for next level
             prev_level_emb = x_emb
             
             # Loss
-            loss = self.loss_fn(logits, gt, mask)
+            loss = self.loss_fn(logits, gt, mask, weights=loss_weights)
             total_loss += loss
             
             stats[f'level_{i}/loss'] = loss.detach()
@@ -656,13 +669,18 @@ class TemporalFractalNetwork(nn.Module):
                 # Update canvas
                 current_canvas = pred
                 
+                step_data = {
+                    'level': i,
+                    'step': step,
+                    'output': current_canvas.detach().cpu(),
+                    'is_structure': (i == 0)
+                }
+                
                 if return_intermediates:
-                    intermediates.append({
-                        'level': i,
-                        'step': step,
-                        'output': current_canvas.detach().cpu(),
-                        'is_structure': (i == 0)
-                    })
+                    intermediates.append(step_data)
+                    
+                if callback:
+                    callback(step_data)
 
             # End of Level: Get final embedding (Enforce knowns one last time)
             if level_known is not None and level_inpaint_mask is not None:
@@ -674,6 +692,7 @@ class TemporalFractalNetwork(nn.Module):
             
             # Get embedding with NO mask
             mask = torch.zeros(batch_size, current_len, dtype=torch.bool, device=device)
+            
             cond_emb = None
             level_cond = None
             if i > 0 and prev_level_emb is not None:

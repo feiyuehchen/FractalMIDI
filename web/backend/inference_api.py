@@ -172,6 +172,24 @@ class InferenceEngine:
         # Run generation in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
         
+        def progress_callback(step_data):
+            # Update job status with partial result
+            # We can expose this via an endpoint that polls job status
+            # step_data: {'level', 'step', 'output', 'is_structure'}
+            # output: Tensor on CPU
+            
+            # We can calculate progress more accurately
+            # Assuming 3 levels, ~14 steps total
+            level = step_data['level']
+            step = step_data['step']
+            # Approx progress
+            p = 0.2 + 0.6 * ((level * 4 + step) / 14)
+            self.jobs[job_id]["progress"] = min(0.9, p)
+            
+            # If structure is done (Level 0 finished), we could signal frontend?
+            # For now, just update progress.
+            pass
+
         def run_sample():
             with torch.no_grad():
                 return model.model.sample(
@@ -181,20 +199,18 @@ class InferenceEngine:
                     cfg=request.cfg,
                     temperature=request.temperature,
                     num_iter_list=request.num_iter_list or self.config.model.default_num_iter_list,
-                    return_intermediates=request.create_gif
+                    return_intermediates=request.create_gif,
+                    callback=progress_callback
                 )
 
         result = await loop.run_in_executor(None, run_sample)
         
         if request.create_gif:
-            # result is (final_output, intermediates)
-            # final_output: (B, 2, T, 128)
             tensor_out, intermediates = result
         else:
             tensor_out = result
             intermediates = None
         
-        # Convert (B, 2, T, 128) -> (2, T, 128) -> (3, T, 128) with dummy tempo
         piano_roll = tensor_out[0].cpu().numpy()
         T = piano_roll.shape[1]
         tempo_ch = np.ones((1, T, 128), dtype=np.float32) * 0.5

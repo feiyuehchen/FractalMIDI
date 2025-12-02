@@ -167,7 +167,21 @@ class FractalMIDILightningModule(pl.LightningModule):
         global_cond = None
         
         # Forward pass
-        loss, stats = self(notes, tempo, density, global_cond)
+        # Loss Warmup: First 5000 steps, only train Content (Notes)
+        # Tempo/Density loss weight = 0.0
+        # We pass this weight via global_cond or modify Loss manually?
+        # The loss function is inside the model.
+        # Let's pass a 'loss_weights' dict or similar via global_cond? 
+        # No, global_cond is for generation conditioning.
+        # We should pass it as an argument to forward/loss.
+        # But model.forward signature is fixed.
+        # Let's assume we can access self.global_step in the model? No.
+        # Let's modify TemporalFractalNetwork.forward to accept loss_weights.
+        
+        tempo_weight = 0.0 if self.global_step < 5000 else 1.0
+        loss_weights = {'tempo': tempo_weight}
+        
+        loss, stats = self.model(notes, tempo, density, global_cond, loss_weights=loss_weights)
         
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=False, prog_bar=True, logger=True)
