@@ -353,6 +353,20 @@ def create_growth_animation(intermediates: List[torch.Tensor],
     if len(intermediates) == 0:
         return [] if save_path is None else None
     
+    # Find maximum dimensions across all frames
+    max_t = 0
+    for i, frame in enumerate(intermediates):
+        if isinstance(frame, dict) and 'output' in frame: frame = frame['output']
+        if isinstance(frame, torch.Tensor):
+            if frame.ndim == 4: # (B, C, T, P)
+                max_t = max(max_t, frame.shape[2])
+            elif frame.ndim == 3: # (C, T, P)
+                max_t = max(max_t, frame.shape[1])
+    
+    # Enforce min_height constraint implicitly if max_t is small? 
+    # No, min_height is for pixel height (Pitch). max_t is Time (Width).
+    # But we want to normalize width.
+    
     easing_functions = {
         "linear": lambda t: t,
         "ease_in_out_cubic": ease_in_out_cubic,
@@ -380,29 +394,24 @@ def create_growth_animation(intermediates: List[torch.Tensor],
         if next_step.ndim == 4: next_step = next_step[0]
 
         # Match dimensions (Time axis is dim 1)
-        if current.shape[1] != next_step.shape[1]:
-            # Upsample the smaller one to match the larger one
-            if current.shape[1] < next_step.shape[1]:
-                # (C, T, P) -> (1, C, T, P) -> Upsample -> (C, T_new, P)
-                # We need to transpose to (N, C, P, T) for 2D interpolation or just 1D on T?
-                # Piano roll is (3, T, 128). We want to stretch T.
-                # F.interpolate takes (N, C, H, W). Let's treat T as H, 128 as W.
-                current = current.unsqueeze(0) # (1, 3, T, 128)
-                current = torch.nn.functional.interpolate(
-                    current, 
-                    size=(next_step.shape[1], next_step.shape[2]), 
-                    mode='nearest'
-                )
-                current = current.squeeze(0)
-            else:
-                # Downsample current (rare, but possible if visualizing reverse?)
-                next_step = next_step.unsqueeze(0)
-                next_step = torch.nn.functional.interpolate(
-                    next_step, 
-                    size=(current.shape[1], current.shape[2]), 
-                    mode='nearest'
-                )
-                next_step = next_step.squeeze(0)
+        # Always upscale to max_t to ensure consistent GIF size
+        if current.shape[1] < max_t:
+            current = current.unsqueeze(0) 
+            current = torch.nn.functional.interpolate(
+                current, 
+                size=(max_t, current.shape[3]), 
+                mode='nearest'
+            )
+            current = current.squeeze(0)
+            
+        if next_step.shape[1] < max_t:
+            next_step = next_step.unsqueeze(0)
+            next_step = torch.nn.functional.interpolate(
+                next_step, 
+                size=(max_t, next_step.shape[3]), 
+                mode='nearest'
+            )
+            next_step = next_step.squeeze(0)
 
         # Detect diff
         diff = (next_step - current).clamp(min=0) if pop_effect else None
@@ -438,6 +447,16 @@ def create_growth_animation(intermediates: List[torch.Tensor],
     if isinstance(final, dict) and 'output' in final: final = final['output']
     if isinstance(final, torch.Tensor): final = final.detach().cpu().float()
     if final.ndim == 4: final = final[0]
+    
+    # Upscale final frame to max_t if needed
+    if final.shape[1] < max_t:
+        final = final.unsqueeze(0)
+        final = torch.nn.functional.interpolate(
+            final, 
+            size=(max_t, final.shape[3]), 
+            mode='nearest'
+        )
+        final = final.squeeze(0)
     
     final_img = piano_roll_to_image(
         final, 

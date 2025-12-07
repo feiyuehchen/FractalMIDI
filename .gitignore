@@ -1,5 +1,6 @@
 # Training outputs
 outputs/
+experiments/
 outputs_old/
 *.npz
 cache/

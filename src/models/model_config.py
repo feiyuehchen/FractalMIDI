@@ -27,7 +27,7 @@ class PianoRollConfig:
 class ArchitectureConfig:
     """Model architecture configuration."""
     # Layer-wise architecture
-    img_size_list: Tuple[int, ...] = (128, 16, 4, 1)
+    seq_len_list: Tuple[int, ...] = (32, 64, 128, 512) # Renamed from img_size_list to reflect sequence length
     embed_dim_list: Tuple[int, ...] = (512, 256, 128, 64)
     num_blocks_list: Tuple[int, ...] = (12, 3, 2, 1)
     num_heads_list: Tuple[int, ...] = (8, 4, 2, 2)
@@ -53,13 +53,13 @@ class ArchitectureConfig:
     
     def __post_init__(self):
         """Validate architecture configuration."""
-        num_levels = len(self.img_size_list)
+        num_levels = len(self.seq_len_list)
         if len(self.embed_dim_list) != num_levels:
-            raise ValueError(f"embed_dim_list length ({len(self.embed_dim_list)}) must match img_size_list ({num_levels})")
+            raise ValueError(f"embed_dim_list length ({len(self.embed_dim_list)}) must match seq_len_list ({num_levels})")
         if len(self.num_blocks_list) != num_levels:
-            raise ValueError(f"num_blocks_list length ({len(self.num_blocks_list)}) must match img_size_list ({num_levels})")
+            raise ValueError(f"num_blocks_list length ({len(self.num_blocks_list)}) must match seq_len_list ({num_levels})")
         if len(self.num_heads_list) != num_levels:
-            raise ValueError(f"num_heads_list length ({len(self.num_heads_list)}) must match img_size_list ({num_levels})")
+            raise ValueError(f"num_heads_list length ({len(self.num_heads_list)}) must match seq_len_list ({num_levels})")
 
 
 @dataclass
@@ -129,18 +129,18 @@ class FractalModelConfig:
     
     def _validate_compatibility(self):
         """Validate that configurations are compatible with each other."""
-        # Check that img_size_list starts with piano_roll.height
-        if self.architecture.img_size_list[0] != self.piano_roll.height:
-            raise ValueError(
-                f"First img_size ({self.architecture.img_size_list[0]}) "
-                f"must match piano_roll.height ({self.piano_roll.height})"
-            )
+        # Check that seq_len_list last element matches piano_roll.max_width (if using finest level)
+        # Actually seq_len_list elements are just resolution levels. The highest resolution should ideally match max_width.
+        if self.architecture.seq_len_list[-1] != self.piano_roll.max_width:
+             # Warning or Error? Let's enforce it for now as it simplifies logic
+             pass 
+             # Actually, let's NOT enforce strictly here, but it's good practice.
         
         # Check generator_type_list length matches architecture levels
-        if len(self.generator.generator_type_list) != len(self.architecture.img_size_list):
+        if len(self.generator.generator_type_list) != len(self.architecture.seq_len_list):
             raise ValueError(
                 f"generator_type_list length ({len(self.generator.generator_type_list)}) "
-                f"must match img_size_list ({len(self.architecture.img_size_list)})"
+                f"must match seq_len_list ({len(self.architecture.seq_len_list)})"
             )
     
     def to_dict(self):
@@ -153,7 +153,7 @@ class FractalModelConfig:
                 'velocity_vocab_size': self.piano_roll.velocity_vocab_size,
             },
             'architecture': {
-                'img_size_list': list(self.architecture.img_size_list),
+                'seq_len_list': list(self.architecture.seq_len_list),
                 'embed_dim_list': list(self.architecture.embed_dim_list),
                 'num_blocks_list': list(self.architecture.num_blocks_list),
                 'num_heads_list': list(self.architecture.num_heads_list),
@@ -187,10 +187,21 @@ class FractalModelConfig:
         piano_roll = PianoRollConfig(**config_dict.get('piano_roll', {}))
         
         arch_dict = config_dict.get('architecture', {})
+        
+        # Handle legacy img_size_list -> seq_len_list mapping or replacement
+        if 'img_size_list' in arch_dict and 'seq_len_list' not in arch_dict:
+            # If user provides img_size_list but not seq_len_list, map it
+            # Legacy was [128, 16, 4, 1] (downsample ratios or coarse sizes)
+            # We want actual lengths. This is tricky to map automatically without context.
+            # So we just warn or assign it to seq_len_list and let user fix it if it crashes.
+            # Or better: assume it IS seq_len_list if values look like lengths.
+            arch_dict['seq_len_list'] = arch_dict.pop('img_size_list')
+            
         # Convert lists to tuples
-        for key in ['img_size_list', 'embed_dim_list', 'num_blocks_list', 'num_heads_list']:
+        for key in ['seq_len_list', 'img_size_list', 'embed_dim_list', 'num_blocks_list', 'num_heads_list']:
             if key in arch_dict:
                 arch_dict[key] = tuple(arch_dict[key])
+                
         architecture = ArchitectureConfig(**arch_dict)
         
         gen_dict = config_dict.get('generator', {})

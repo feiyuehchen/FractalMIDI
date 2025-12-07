@@ -39,7 +39,7 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
+    def forward(self, x, attn_mask=None, is_causal=False):
         B, N, C = x.shape
         # qkv: (B, N, 3*C) -> reshape -> (B, N, 3, H, D)
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
@@ -53,7 +53,7 @@ class Attention(nn.Module):
                 qkv,
                 dropout_p=self.attn_drop.p if self.training else 0.0,
                 softmax_scale=self.scale,
-                causal=False
+                causal=is_causal
             )
             # Output: (B, N, H, D)
             x = x.reshape(B, N, C)
@@ -67,19 +67,27 @@ class Attention(nn.Module):
             if hasattr(F, 'scaled_dot_product_attention'):
                 x = F.scaled_dot_product_attention(
                     q, k, v,
+                    attn_mask=attn_mask,
                     dropout_p=self.attn_drop.p if self.training else 0.0,
-                    scale=self.scale
+                    scale=self.scale,
+                    is_causal=is_causal
                 )
                 x = x.transpose(1, 2).reshape(B, N, C)
             else:
-                # Legacy manual implementation
-                with torch.cuda.amp.autocast(enabled=False):
-                    attn = (q.float() @ k.float().transpose(-2, -1)) * self.scale
+                # Legacy manual implementation (uses custom scaled_dot_product_attention from utils)
+                # Reshape for custom util: (B, H, N, D) -> (B*H, N, D) ?? No, util expects (..., L, D)
+                # But util implementation: L, S = query.size(-2), key.size(-2)
+                # It supports batch dimensions.
                 
-                attn = attn - torch.max(attn, dim=-1, keepdim=True)[0]
-                attn = attn.softmax(dim=-1)
-                attn = self.attn_drop(attn)
-                x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+                # Use the utility function which supports causal/mask
+                x = scaled_dot_product_attention(
+                     q, k, v,
+                     attn_mask=attn_mask,
+                     dropout_p=self.attn_drop.p if self.training else 0.0,
+                     is_causal=is_causal,
+                     scale=self.scale
+                )
+                x = x.transpose(1, 2).reshape(B, N, C)
 
         x = self.proj(x)
         x = self.proj_drop(x)

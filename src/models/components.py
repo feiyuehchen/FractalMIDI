@@ -130,6 +130,181 @@ class FractalOutputProj(nn.Module):
         x = x.permute(0, 2, 1, 3) 
         return x
 
+class LSTMOutputProj(nn.Module):
+    """
+    LSTM-based Decoder for Pitch-wise Autoregression.
+    
+    Structure:
+    - Condition: Transformer Embedding (B, T, E)
+    - Input: Previous Pitch Token (B, T, 2)
+    - LSTM: 2 Layers, Hidden 1024
+    - Output: Current Pitch Token (B, T, 2) (Note On/Off logits + Velocity)
+    """
+    def __init__(self, embed_dim, out_channels=2, hidden_dim=1024, num_layers=2):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.out_channels = out_channels
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        
+        # Project Transformer embedding to initialize LSTM state or as constant input
+        # Here we concatenate embedding with input at each step
+        self.cond_proj = nn.Linear(embed_dim, hidden_dim)
+        
+        # Input projection (Pitch Token -> Hidden)
+        # Pitch Token is (Note, Velocity)
+        self.input_proj = nn.Linear(out_channels, hidden_dim)
+        
+        self.lstm = nn.LSTM(
+            input_size=hidden_dim * 2, # Input + Condition
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True
+        )
+        
+        self.output_head = nn.Linear(hidden_dim, out_channels)
+        
+        # SOS Token for Pitch Sequence (learned)
+        self.sos_token = nn.Parameter(torch.zeros(1, 1, out_channels))
+        nn.init.normal_(self.sos_token, std=0.02)
+
+    def forward(self, x, target=None, teacher_forcing=True):
+        """
+        Args:
+            x: Transformer Embeddings (B, T, E)
+            target: Ground Truth Piano Roll (B, 2, T, 128) - optional for inference
+            teacher_forcing: Whether to use teacher forcing (training) or autoregressive (inference)
+        
+        Returns:
+            logits: (B, 2, T, 128)
+        """
+        B, T, E = x.shape
+        
+        # 1. Prepare Condition
+        # (B, T, E) -> (B*T, 1, E) -> (B*T, 1, H)
+        cond = self.cond_proj(x).reshape(B*T, 1, self.hidden_dim)
+        
+        if teacher_forcing and target is not None:
+            # Training Mode: Parallel Pitch Generation
+            # Target: (B, 2, T, 128) -> (B, T, 2, 128) -> (B, T, 128, 2) -> (B*T, 128, 2)
+            target_seq = target.permute(0, 2, 3, 1).reshape(B*T, 128, self.out_channels)
+            
+            # Prepare Inputs: [SOS, p_0, ..., p_126]
+            sos = self.sos_token.expand(B*T, 1, -1)
+            lstm_input_seq = torch.cat([sos, target_seq[:, :-1, :]], dim=1) # (B*T, 128, 2)
+            
+            # Embed Inputs
+            lstm_input_emb = self.input_proj(lstm_input_seq) # (B*T, 128, H)
+            
+            # Concatenate Condition to every step
+            # cond: (B*T, 1, H) -> expand to (B*T, 128, H)
+            cond_expanded = cond.expand(-1, 128, -1)
+            
+            full_input = torch.cat([lstm_input_emb, cond_expanded], dim=-1) # (B*T, 128, 2*H)
+            
+            # LSTM Forward
+            output, _ = self.lstm(full_input) # (B*T, 128, H)
+            
+            # Project to Output
+            logits = self.output_head(output) # (B*T, 128, 2)
+            
+            # Reshape back: (B, T, 128, 2) -> (B, 2, T, 128)
+            logits = logits.view(B, T, 128, 2).permute(0, 3, 1, 2)
+            
+            return logits
+            
+        else:
+            # Inference Mode: Autoregressive Pitch Generation
+            # We generate 128 pitches sequentially for each time step
+            # x is (B, T, E)
+            
+            # Prepare initial state (default zeros)
+            h_state = None 
+            
+            # Prepare Condition: (B*T, 1, H)
+            cond_step = cond # Constant for all pitch steps
+            
+            # Initial Input: SOS (B*T, 1, 2)
+            curr_input = self.sos_token.expand(B*T, 1, -1)
+            
+            outputs = []
+            
+            for p in range(128):
+                # Embed Input
+                curr_emb = self.input_proj(curr_input) # (B*T, 1, H)
+                
+                # Concat Condition
+                full_input = torch.cat([curr_emb, cond_step], dim=-1) # (B*T, 1, 2*H)
+                
+                # LSTM Step
+                out_step, h_state = self.lstm(full_input, h_state) # out: (B*T, 1, H)
+                
+                # Logits
+                logit_step = self.output_head(out_step) # (B*T, 1, 2)
+                outputs.append(logit_step)
+                
+                # Sample for next input (Greedy or Sampling?)
+                # For simplicity in this module, we use greedy/logits as input?
+                # Ideally we should sample. But here we just return logits.
+                # To make this module self-contained for "forward", we need to sample.
+                # BUT, usually 'forward' implies training. 'sample' implies inference.
+                # However, we are called from TemporalFractalNetwork.sample/forward.
+                
+                # If we are just forwarding without target (inference), we MUST sample to get next input.
+                # Let's assume Greedy for simple forwarding, or use probabilistic sampling if needed.
+                # For now: Sigmoid > 0.5 for Note, Identity for Vel?
+                
+                # But wait, to be consistent with external sampling control (temp etc),
+                # maybe we should expose a 'sample_pitch' method?
+                # Or just use the prediction as next input (Teacher Forcing with self-prediction).
+                
+                pred_note = torch.sigmoid(logit_step[:, :, 0]) > 0.5
+                pred_vel = torch.clamp(logit_step[:, :, 1], 0, 1)
+                curr_input = torch.stack([pred_note.float(), pred_vel], dim=-1)
+
+            # Stack outputs
+            logits = torch.cat(outputs, dim=1) # (B*T, 128, 2)
+            logits = logits.view(B, T, 128, 2).permute(0, 3, 1, 2)
+            
+            return logits
+
+    def sample(self, x, temperature=1.0):
+        """
+        Explicit sampling method for inference.
+        """
+        B, T, E = x.shape
+        cond = self.cond_proj(x).reshape(B*T, 1, self.hidden_dim)
+        
+        h_state = None
+        curr_input = self.sos_token.expand(B*T, 1, -1)
+        outputs = []
+        
+        for p in range(128):
+            curr_emb = self.input_proj(curr_input)
+            full_input = torch.cat([curr_emb, cond], dim=-1)
+            out_step, h_state = self.lstm(full_input, h_state)
+            logit_step = self.output_head(out_step)
+            
+            # Store Logit
+            outputs.append(logit_step)
+            
+            # Sample next input
+            logits_note = logit_step[:, :, 0]
+            logits_vel = logit_step[:, :, 1]
+            
+            if temperature > 0:
+                probs = torch.sigmoid(logits_note / temperature)
+                pred_note = torch.bernoulli(probs)
+            else:
+                pred_note = (logits_note > 0).float()
+                
+            pred_vel = torch.clamp(logits_vel, 0, 1)
+            curr_input = torch.stack([pred_note, pred_vel], dim=-1)
+            
+        logits = torch.cat(outputs, dim=1) # (B*T, 128, 2)
+        logits = logits.view(B, T, 128, 2).permute(0, 3, 1, 2)
+        return logits
+
 class StructureInputProj(nn.Module):
     def __init__(self, in_channels, embed_dim, max_bar_len=16):
         super().__init__()

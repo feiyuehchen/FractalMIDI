@@ -169,7 +169,9 @@ class FractalMIDILightningModule(pl.LightningModule):
             max_bar_len=arch_cfg.max_bar_len,
             compressed_dim=arch_cfg.compressed_dim,
             compression_act=arch_cfg.compression_act,
-            full_mask_prob=model_cfg.generator.full_mask_prob
+            full_mask_prob=model_cfg.generator.full_mask_prob,
+            generator_type_list=model_cfg.generator.generator_type_list,
+            scan_order=model_cfg.generator.scan_order
         )
         return model
     
@@ -236,11 +238,12 @@ class FractalMIDILightningModule(pl.LightningModule):
 
         # Log images
         if batch_idx == 0:
+            log_freq = self.config.log_images_every_n_steps
             should_log_images = (
-                self.config.log_images_every_n_steps is not None
-                and self.config.log_images_every_n_steps > 0
+                log_freq is not None
+                and log_freq > 0
                 and self.global_step > 0
-                and self.global_step % self.config.log_images_every_n_steps == 0
+                and (self.global_step // log_freq > self._last_logged_image_step // log_freq)
             )
             
             if should_log_images:
@@ -404,7 +407,7 @@ class FractalMIDILightningModule(pl.LightningModule):
                 # Log composite
                 log_piano_roll_to_tensorboard(
                     self.logger.experiment,
-                    f'{split}_images/1_generated_step_{self.global_step:07d}/sample_{i}_composite', 
+                    f'{split}_images/1_generated_step/sample_{i}_composite', 
                     roll,
                     self.global_step,
                     apply_colormap=True
@@ -559,7 +562,7 @@ def create_trainer(config: FractalTrainerConfig, *, val_check_interval: float | 
     Create PyTorch Lightning trainer.
     """
     # Default trainer arguments
-    strategy = config.strategy if config.strategy is not None else ('ddp' if torch.cuda.device_count() > 1 else 'auto')
+    strategy = config.strategy if config.strategy is not None else ('ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else 'auto')
 
     default_args = {
         'max_steps': config.max_steps,

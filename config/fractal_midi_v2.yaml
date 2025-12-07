@@ -3,29 +3,45 @@
 
 # Model configuration
 model:
-  # Architecture (4 levels: 128→16→4→1) with smaller dimensions
+  # Architecture (Hierarchical Levels from Coarse to Fine)
   architecture:
-    img_size_list: [128, 16, 4, 1]
-    embed_dim_list: [512, 512, 256, 128]    # Increased capacity
-    num_blocks_list: [8, 8, 4, 2]          # Increased depth
-    num_heads_list: [8, 8, 4, 2]           # Adjusted heads
-    attn_dropout: 0.1                      # Reduced dropout
+    # Sequence Length for each level (Must match downsample factors)
+    # Level 0 (32):  Structure (approx 2 bars) - Coarse Planning
+    # Level 1 (64):  Phrase (approx 1 bar)
+    # Level 2 (128): Beat (1/4 note resolution)
+    # Level 3 (512): Content (1/16 note resolution) - Full Detail
+    seq_len_list: [32, 64, 128, 512]
+    
+    # Hidden Dimension for each level
+    embed_dim_list: [512, 512, 256, 128]    
+    
+    # Transformer Depth (Number of Blocks)
+    num_blocks_list: [8, 8, 4, 2]          
+    
+    # Number of Attention Heads
+    num_heads_list: [8, 8, 4, 2]           
+    
+    attn_dropout: 0.1                      
     proj_dropout: 0.1
     init_std: 0.02
     input_channels: 2
     cond_dim: 0
     max_bar_len: 64
-    compressed_dim: 64                     # Increased bottleneck width
+    compressed_dim: 64                     # Bottleneck dimension between levels
     compression_act: 'relu'
 
   # Generator configuration
   generator:
-    generator_type_list: [ar, mar, mar, mar]
-    scan_order: column_major
+    # Hybrid Strategy: Structure (MAR) -> Content (AR)
+    # MAR: Bidirectional context for global structure (Density/Tempo)
+    # AR:  Unidirectional context with LSTM Decoder for coherent notes/chords
+    generator_type_list: [ar, ar, ar, ar]
+    
+    scan_order: row_major # Used for AR steps if flexible order is implemented
     mask_ratio_loc: 1.0                    # MAR: mean mask ratio
     mask_ratio_scale: 0.8                   # MAR: std of mask ratio
     full_mask_prob: 0.1                     # Probability of forcing 100% mask during training
-    ar_prefix_mask_ratio: 1.0               # AR: max prefix mask ratio (1.0 = can mask 100% of prefix)
+    ar_prefix_mask_ratio: 1.0               # AR: max prefix mask ratio
     num_conds: 5
 
   # Training settings
@@ -44,13 +60,13 @@ training:
   train_batch_size: 64
   val_batch_size: 8
 
-# Optimizer (Optional override or structure match)
+# Optimizer
 optimizer:
   lr: 1.0e-4
   betas: [0.9, 0.95]
   weight_decay: 0.05
 
-# Scheduler (Optional)
+# Scheduler
 scheduler:
   schedule_type: "cosine"
   warmup_steps: 2000
@@ -78,7 +94,7 @@ hardware:
 
 # Logging and checkpointing
 logging:
-  output_dir: outputs/pop909_all_mar
+  output_dir: experiments/pop909_all_ar
   log_every_n_steps: 50
   val_check_interval_steps: 1000
   checkpoint_every_n_steps: 10000

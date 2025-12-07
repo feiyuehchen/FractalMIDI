@@ -184,6 +184,7 @@ class MIDIDataset(Dataset):
             self.file_paths = [line.strip() for line in f if line.strip()]
         
         print(f"Loaded {len(self.file_paths)} MIDI files from {file_list_path}")
+        print(f"Dataset Init: random_crop={self.random_crop}, crop_length={self.crop_length}, min_length={self.min_length}")
         if self.random_crop and self.augment_factor > 1:
             print(f"Data augmentation enabled: {self.augment_factor}x ({self.augment_factor * len(self.file_paths)} effective samples)")
             print(f"Crop length: {self.crop_length} steps, Min length: {self.min_length} steps")
@@ -433,6 +434,40 @@ class MIDIDataset(Dataset):
                     bar_pos = bar_pos[start_idx:start_idx + self.crop_length]
                     duration_steps = self.crop_length
                 # If duration_steps <= crop_length, keep full sequence
+            elif self.crop_length is not None and self.crop_length > 0:
+                # Even if random_crop is False, enforce crop_length if specified (deterministically take the start)
+                # This ensures consistent visualization size (e.g. 512) for validation
+                if duration_steps > self.crop_length:
+                    notes = notes[:, :self.crop_length, :]
+                    tempo = tempo[:self.crop_length]
+                    density = density[:self.crop_length]
+                    bar_pos = bar_pos[:self.crop_length]
+                    duration_steps = self.crop_length
+                elif duration_steps < self.crop_length:
+                    # Pad to crop_length if shorter
+                    if idx == 0 and not self.random_crop:
+                        print(f"DEBUG: Padding validation sample {idx} from {duration_steps} to {self.crop_length}")
+                    
+                    pad_len = self.crop_length - duration_steps
+                    notes_pad = np.zeros((2, pad_len, 128), dtype=notes.dtype)
+                    notes = np.concatenate([notes, notes_pad], axis=1)
+                    
+                    tempo_pad = np.repeat(tempo[-1:], pad_len) if duration_steps > 0 else np.zeros(pad_len, dtype=tempo.dtype)
+                    tempo = np.concatenate([tempo, tempo_pad], axis=0)
+                    
+                    density_pad = np.zeros(pad_len, dtype=density.dtype)
+                    density = np.concatenate([density, density_pad], axis=0)
+                    
+                    # Continue bar pos sequence or pad 0
+                    if duration_steps > 0:
+                        last_val = bar_pos[-1]
+                        pad_pos_seq = np.arange(1, pad_len + 1, dtype=bar_pos.dtype)
+                        pad_bar_pos_vals = (last_val + pad_pos_seq) % 16
+                        bar_pos = np.concatenate([bar_pos, pad_bar_pos_vals], axis=0)
+                    else:
+                        bar_pos = np.zeros(pad_len, dtype=bar_pos.dtype)
+                    
+                    duration_steps = self.crop_length
             
             # Apply pitch shift augmentation
             shift = self.pitch_shifts[pitch_variant_idx] if self.pitch_shifts else 0

@@ -180,7 +180,8 @@ def merge_config_with_args(config_dict, args):
 
     # Model (Overrides)
     # Architecture
-    if hasattr(args, 'img_size_list') and args.img_size_list is not None: full_config.model.architecture.img_size_list = args.img_size_list
+    if hasattr(args, 'seq_len_list') and args.seq_len_list is not None: full_config.model.architecture.seq_len_list = args.seq_len_list
+    if hasattr(args, 'img_size_list') and args.img_size_list is not None: full_config.model.architecture.seq_len_list = args.img_size_list # Backwards compatibility
     if hasattr(args, 'embed_dim_list') and args.embed_dim_list is not None: full_config.model.architecture.embed_dim_list = args.embed_dim_list
     if hasattr(args, 'num_blocks_list') and args.num_blocks_list is not None: full_config.model.architecture.num_blocks_list = args.num_blocks_list
     if hasattr(args, 'num_heads_list') and args.num_heads_list is not None: full_config.model.architecture.num_heads_list = args.num_heads_list
@@ -228,7 +229,8 @@ def merge_config_with_args(config_dict, args):
 
     # Flatten Model (for those parts main.py or trainer setup might read directly from args)
     # Most model config is passed as the struct, but some legacy code might look at args
-    merged.img_size_list = full_config.model.architecture.img_size_list
+    merged.seq_len_list = full_config.model.architecture.seq_len_list
+    merged.img_size_list = full_config.model.architecture.seq_len_list # Backwards compatibility
     merged.embed_dim_list = full_config.model.architecture.embed_dim_list
     merged.num_blocks_list = full_config.model.architecture.num_blocks_list
     merged.num_heads_list = full_config.model.architecture.num_heads_list
@@ -348,7 +350,7 @@ def print_training_summary(args, gpu_indices, train_batches, val_batches, val_in
     print(f"\n{'='*70}")
     print(f"FractalGen MIDI Training")
     print(f"{'='*70}")
-    arch_str = '→'.join(str(x) for x in args.img_size_list)
+    arch_str = '→'.join(str(x) for x in args.seq_len_list)
     print(f"Model: FractalGen ({arch_str})")
     print(f"Train batch size: {args.train_batch_size}")
     print(f"Val batch size: {args.val_batch_size}")
@@ -440,7 +442,7 @@ def setup_trainer_config(args):
     config.model.generator.full_mask_prob = args.full_mask_prob
     
     # Set model architecture from config
-    config.model.architecture.img_size_list = args.img_size_list
+    config.model.architecture.seq_len_list = args.seq_len_list
     config.model.architecture.embed_dim_list = args.embed_dim_list
     config.model.architecture.num_blocks_list = args.num_blocks_list
     config.model.architecture.num_heads_list = args.num_heads_list
@@ -497,6 +499,7 @@ def setup_dataloaders(args):
     val_dataset_cfg = MIDIDatasetConfig(
         file_list_path=args.val_data,
         random_crop=False,
+        crop_length=args.crop_length,
         augment_factor=1,
         cache_in_memory=not args.no_cache_in_memory,
         cache_dir=args.cache_dir,
