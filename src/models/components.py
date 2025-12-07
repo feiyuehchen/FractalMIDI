@@ -111,7 +111,10 @@ class FractalInputProj(nn.Module):
         x = x + self.pos_emb(x)
         
         if bar_pos is not None:
-            x = x + self.bar_emb(bar_pos)
+            # Clamp bar_pos to valid range to prevent crashes
+            max_valid_idx = self.bar_emb.num_embeddings - 1
+            bar_pos_clamped = torch.clamp(bar_pos, 0, max_valid_idx)
+            x = x + self.bar_emb(bar_pos_clamped)
             
         return x
 
@@ -140,7 +143,10 @@ class StructureInputProj(nn.Module):
         x = x + self.pos_emb(x)
         
         if bar_pos is not None:
-            x = x + self.bar_emb(bar_pos)
+            # Clamp bar_pos to valid range to prevent crashes
+            max_valid_idx = self.bar_emb.num_embeddings - 1
+            bar_pos_clamped = torch.clamp(bar_pos, 0, max_valid_idx)
+            x = x + self.bar_emb(bar_pos_clamped)
             
         return x
 

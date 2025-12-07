@@ -379,6 +379,31 @@ def create_growth_animation(intermediates: List[torch.Tensor],
         if current.ndim == 4: current = current[0] # (3, T, 128)
         if next_step.ndim == 4: next_step = next_step[0]
 
+        # Match dimensions (Time axis is dim 1)
+        if current.shape[1] != next_step.shape[1]:
+            # Upsample the smaller one to match the larger one
+            if current.shape[1] < next_step.shape[1]:
+                # (C, T, P) -> (1, C, T, P) -> Upsample -> (C, T_new, P)
+                # We need to transpose to (N, C, P, T) for 2D interpolation or just 1D on T?
+                # Piano roll is (3, T, 128). We want to stretch T.
+                # F.interpolate takes (N, C, H, W). Let's treat T as H, 128 as W.
+                current = current.unsqueeze(0) # (1, 3, T, 128)
+                current = torch.nn.functional.interpolate(
+                    current, 
+                    size=(next_step.shape[1], next_step.shape[2]), 
+                    mode='nearest'
+                )
+                current = current.squeeze(0)
+            else:
+                # Downsample current (rare, but possible if visualizing reverse?)
+                next_step = next_step.unsqueeze(0)
+                next_step = torch.nn.functional.interpolate(
+                    next_step, 
+                    size=(current.shape[1], current.shape[2]), 
+                    mode='nearest'
+                )
+                next_step = next_step.squeeze(0)
+
         # Detect diff
         diff = (next_step - current).clamp(min=0) if pop_effect else None
         

@@ -155,6 +155,7 @@ class TemporalFractalNetwork(nn.Module):
         
         self.compressed_dim = compressed_dim
         self.full_mask_prob = full_mask_prob
+        self.max_bar_len = max_bar_len
         
         # Configurable activation
         act_layer = nn.ReLU()
@@ -242,7 +243,7 @@ class TemporalFractalNetwork(nn.Module):
             pad_seq = torch.arange(1, pad_len+1, device=bar_pos.device).unsqueeze(0).expand(B, -1)
             # Assuming max_bar_len wrapping roughly, but actually bar_pos values are just integers
             # We just extend pattern or reuse last
-            pad_vals = (last_pos.unsqueeze(1) + pad_seq) % 16 # Fallback modulo if unknown, but just padding
+            pad_vals = (last_pos.unsqueeze(1) + pad_seq) % self.max_bar_len # Correctly use configured max_bar_len
             bar_pos = torch.cat([bar_pos, pad_vals], dim=1)
             T = bar_pos.shape[1]
             
@@ -325,6 +326,9 @@ class TemporalFractalNetwork(nn.Module):
             current_len = length // factor
             
             level_bar_pos = self._downsample_bar_pos(bar_pos, factor)
+            # Fix: Trim bar_pos if padding in _downsample made it longer than current_len
+            if level_bar_pos.shape[1] > current_len:
+                level_bar_pos = level_bar_pos[:, :current_len]
             
             if i == 0: 
                 current_canvas = torch.zeros(batch_size, 2, current_len, device=device, dtype=dtype)

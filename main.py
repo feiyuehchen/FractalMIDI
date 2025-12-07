@@ -23,7 +23,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.training.trainer import FractalMIDILightningModule, create_trainer
+from src.training.trainer import FractalMIDILightningModule, create_trainer, DualProgressBar
 from src.training.train_utils import (
     load_config,
     merge_config_with_args,
@@ -221,6 +221,7 @@ def main():
     # Callbacks
     checkpoint_steps = max(1, config.checkpoint_every_n_steps)
     callbacks = [
+        DualProgressBar(),
         ModelCheckpoint(
             dirpath=checkpoint_dir,
             filename='step_{step:08d}-val_loss_{val_loss:.4f}',

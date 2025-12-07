@@ -35,7 +35,7 @@ model:
 
 # Training configuration
 training:
-  max_steps: 200000                      
+  max_steps: 100000                      
   learning_rate: 1.0e-4
   weight_decay: 0.05
   warmup_steps: 2000                    
@@ -81,7 +81,7 @@ logging:
   output_dir: outputs/pop909_all_mar
   log_every_n_steps: 50
   val_check_interval_steps: 1000
-  checkpoint_every_n_steps: 1000
+  checkpoint_every_n_steps: 10000
   save_top_k: 3
   log_images_every_n_steps: 1000
   num_images_to_log: 2

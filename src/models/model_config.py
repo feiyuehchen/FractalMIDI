@@ -76,7 +76,7 @@ class GeneratorConfig:
     mask_ratio_loc: float = 1.0          # Mean mask ratio (1.0 = 100%, 0.5 = 50%)
     mask_ratio_scale: float = 0.5        # Std dev of mask ratio (for random masking)
     full_mask_prob: float = 0.1          # Probability of forcing full mask (100%) during training
-
+    
     # Generation settings
     num_conds: int = 5                   # Number of conditioning embeddings for guiding pixel
     guiding_pixel: bool = False          # Use guiding pixel (set per level in runtime)

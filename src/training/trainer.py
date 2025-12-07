@@ -25,6 +25,63 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from src.models.temporal_fractal import TemporalFractalNetwork
 from src.models.model_config import FractalModelConfig, ArchitectureConfig
 from src.visualization.visualizer import log_piano_roll_to_tensorboard
+from pytorch_lightning.callbacks import TQDMProgressBar
+import sys
+from tqdm.auto import tqdm
+
+# ==============================================================================
+# Custom Callbacks
+# ==============================================================================
+
+class DualProgressBar(TQDMProgressBar):
+    """
+    Progress Bar that shows both Global Steps (Total) and Epoch Steps (Current Epoch).
+    Reference: ling482_African_ASR/training/custom_progressbar.py
+    """
+    def __init__(self):
+        # process_position=1 makes the standard epoch bar start at line 1
+        super().__init__(process_position=1)
+        self.global_progress_bar = None
+        
+    def init_train_tqdm(self):
+        """Override to customize the epoch bar (inner bar)."""
+        bar = super().init_train_tqdm()
+        bar.set_description("Epoch Progress")
+        return bar
+        
+    def on_train_start(self, trainer, pl_module):
+        super().on_train_start(trainer, pl_module)
+        # Create a persistent global progress bar at position 0
+        if trainer.is_global_zero:
+            self.global_progress_bar = tqdm(
+                desc="Global Progress",
+                total=trainer.max_steps,
+                initial=trainer.global_step,
+                position=0,
+                leave=True,
+                dynamic_ncols=True,
+                file=sys.stdout,
+                smoothing=0
+            )
+        
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+        if self.global_progress_bar and trainer.is_global_zero:
+            self.global_progress_bar.n = trainer.global_step
+            self.global_progress_bar.refresh()
+            # Update postfix with loss
+            metrics = trainer.callback_metrics
+            postfix = {}
+            if 'train_loss' in metrics:
+                postfix['loss'] = f"{metrics['train_loss']:.3f}"
+            if 'val_loss' in metrics:
+                postfix['val_loss'] = f"{metrics['val_loss']:.3f}"
+            self.global_progress_bar.set_postfix(postfix)
+            
+    def on_train_end(self, trainer, pl_module):
+        super().on_train_end(trainer, pl_module)
+        if self.global_progress_bar:
+            self.global_progress_bar.close()
 
 
 # ==============================================================================
@@ -254,13 +311,41 @@ class FractalMIDILightningModule(pl.LightningModule):
             for i in range(num_to_log):
                 roll = gt_rolls[i]
                 try:
+                    # Log composite
                     log_piano_roll_to_tensorboard(
                         self.logger.experiment,
-                        f'{split}_images/0_ground_truth/sample_{i}', 
+                        f'{split}_images/0_ground_truth/sample_{i}_composite', 
                         roll.detach().cpu(),
                         self.global_step,
                         apply_colormap=True
                     )
+                    
+                    # Log channels separately
+                    channels = ['Note', 'Velocity', 'Tempo']
+                    # roll shape: (3, T, 128) -> Note, Vel, Tempo
+                    # Note: Tempo channel is (T, 128) where values are broadcasted along pitch
+                    
+                    for c, name in enumerate(channels):
+                        ch_data = roll[c].detach().cpu() # (T, 128)
+                        
+                        # piano_roll_to_image expects (128, T) for single channel legacy support
+                        # So we transpose
+                        ch_data_t = ch_data.T # (128, T)
+                        
+                        # For Note (c=0), it's binary. We can use no colormap or velocity map.
+                        # For Velocity (c=1), use Velocity map.
+                        # For Tempo (c=2), it will use Velocity map by default unless we change visualizer.
+                        # But visualizing Tempo as a piano roll (128, T) is a bit weird since it's uniform across pitch.
+                        # But it shows the curve.
+                        
+                        log_piano_roll_to_tensorboard(
+                            self.logger.experiment,
+                            f'{split}_images/0_ground_truth/sample_{i}_ch_{name}',
+                            ch_data_t, 
+                            self.global_step,
+                            apply_colormap=True
+                        )
+
                 except Exception as exc:
                     print(f"Warning: Failed to log ground truth {i}: {exc}")
             self._ground_truth_logged = True
@@ -316,13 +401,29 @@ class FractalMIDILightningModule(pl.LightningModule):
         for i in range(min(samples_to_generate, gen_rolls.size(0))):
             roll = gen_rolls[i]
             try:
+                # Log composite
                 log_piano_roll_to_tensorboard(
                     self.logger.experiment,
-                    f'{split}_images/1_generated_step_{self.global_step:07d}/sample_{i}', 
+                    f'{split}_images/1_generated_step_{self.global_step:07d}/sample_{i}_composite', 
                     roll,
                     self.global_step,
                     apply_colormap=True
                 )
+                
+                # Log channels separately
+                channels = ['Note', 'Velocity', 'Tempo']
+                for c, name in enumerate(channels):
+                    ch_data = roll[c] # (T, 128)
+                    ch_data_t = ch_data.T # (128, T)
+                    
+                    log_piano_roll_to_tensorboard(
+                        self.logger.experiment,
+                        f'{split}_images/1_generated_step_{self.global_step:07d}/sample_{i}_ch_{name}',
+                        ch_data_t, 
+                        self.global_step,
+                        apply_colormap=True
+                    )
+
             except Exception as exc:
                 print(f"Warning: Failed to log generated sample {i}: {exc}")
         
@@ -332,7 +433,7 @@ class FractalMIDILightningModule(pl.LightningModule):
     def _create_generation_gifs(self, intermediates, num_samples, split='val'):
         """Create GIF animations from generation intermediates."""
         try:
-            from code.visualization.visualizer import create_growth_animation
+            from src.visualization.visualizer import create_growth_animation
             import os
             
             gif_dir = os.path.join(self.logger.log_dir, 'generation_gifs')
