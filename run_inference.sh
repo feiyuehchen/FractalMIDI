@@ -30,7 +30,7 @@ fi
 echo "Checkpoint: $CHECKPOINT"
 
 # Build command
-CMD="python inference.py --checkpoint \"$CHECKPOINT\""
+CMD="python src/inference/inference.py --checkpoint \"$CHECKPOINT\""
 
 # Add config if provided
 if [ -n "$CONFIG_FILE" ]; then

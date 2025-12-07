@@ -58,7 +58,7 @@ echo "========================================================================"
 echo ""
 
 # Run inference
-python inference.py \
+python src/inference/inference.py \
     --checkpoint "$CHECKPOINT" \
     --mode "$MODE" \
     --num_samples "$NUM_SAMPLES" \

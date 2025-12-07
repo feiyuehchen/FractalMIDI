@@ -3,12 +3,13 @@
 
 # Model configuration
 model:
-  # Piano roll settings
-  piano_roll_height: 128
+  piano_roll:
+    height: 128
   patch_size: 4
-  velocity_vocab_size: 32
+  velocity_vocab_size: 256 # Fixed to 256 for compatibility
   
   # Architecture (4 levels: 128→16→4→1) with smaller dimensions
+  architecture:
   img_size_list: [128, 16, 4, 1]
   embed_dim_list: [256, 256, 128, 64]     # Half the default size
   num_blocks_list: [8, 4, 2, 1]          # Fewer transformer blocks
@@ -16,16 +17,23 @@ model:
   attn_dropout: 0.2                      # More dropout for smaller model
   proj_dropout: 0.2
   init_std: 0.02
+  input_channels: 2
+  cond_dim: 0
+  max_bar_len: 64
+  compressed_dim: 32
+  compression_act: 'relu'
   
   # Generator configuration
-  generator_types: [ar, mar, mar, mar]
+  generator:
+  generator_type_list: [ar, mar, mar, mar]
   scan_order: column_major
   mask_ratio_loc: 1.0                    # MAR: mean mask ratio
   mask_ratio_scale: 0.8                   # MAR: std of mask ratio
-  ar_prefix_mask_ratio: 1.0               # AR: max prefix mask ratio (1.0 = can mask 100% of prefix)
+  ar_prefix_mask_ratio: 1.0               # AR: max prefix mask ratio
   num_conds: 5
   
   # Training settings
+  training:
   grad_checkpointing: false
   v_weight: 1.0
 
@@ -42,14 +50,14 @@ training:
 
 # Data configuration
 data:
-  train_data: dataset/pop909/train.txt
-  val_data: dataset/pop909/valid.txt
+  train_data: data/lists/train.txt
+  val_data: data/lists/valid.txt
   crop_length: 256                       
   augment_factor: 10                      # Random crop augmentation factor
   pitch_shift_min: -12                    # Minimum pitch shift (semitones)
   pitch_shift_max: 12    
   cache_in_memory: true
-  cache_dir: dataset/cache/pop909
+  cache_dir: data/cache/pop909
 
 # Hardware configuration
 hardware:
@@ -62,7 +70,7 @@ hardware:
 
 # Logging and checkpointing
 logging:
-  output_dir: outputs/pop909_ar_3mar
+  output_dir: outputs/pop909_small
   log_every_n_steps: 50
   val_check_interval_steps: 2000
   checkpoint_every_n_steps: 10000
@@ -73,4 +81,3 @@ logging:
 # Other
 seed: 42
 fast_dev_run: false
-

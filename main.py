@@ -14,13 +14,17 @@ Usage:
 
 import argparse
 from pathlib import Path
+import sys
+
+# Add code to path
+sys.path.append(str(Path(__file__).parent))
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from trainer import FractalMIDILightningModule, create_trainer
-from train_utils import (
+from src.training.trainer import FractalMIDILightningModule, create_trainer
+from src.training.train_utils import (
     load_config,
     merge_config_with_args,
     apply_config_defaults,
@@ -104,6 +108,17 @@ def parse_args():
                        help='Mean mask ratio for MAR (1.0 = mask 100%%, 0.5 = mask 50%%)')
     parser.add_argument('--mask_ratio_scale', type=float, default=0.5,
                        help='Standard deviation of mask ratio for MAR')
+    parser.add_argument('--full_mask_prob', type=float, default=0.1,
+                       help='Probability of forcing 100%% mask during training')
+    
+    # New Model Architecture Configs
+    parser.add_argument('--max_bar_len', type=int, default=64,
+                       help='Maximum bar length for position embedding')
+    parser.add_argument('--compressed_dim', type=int, default=32,
+                       help='Dimension of harmonic compression bottleneck')
+    parser.add_argument('--compression_act', type=str, default='relu',
+                       choices=['relu', 'gelu', 'identity'],
+                       help='Activation function for harmonic compression')
     
     # Logging and checkpointing
     parser.add_argument('--output_dir', type=str, default='outputs/fractalgen',
@@ -266,4 +281,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

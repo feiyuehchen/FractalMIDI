@@ -1,42 +1,91 @@
 # FractalMIDI 2.0 Configuration
 # Architecture: Tempo-Aware Temporal Fractal Network (TFN)
 
-# Training Hyperparameters
-max_steps: 200000
-grad_clip: 3.0
-accumulate_grad_batches: 1
-precision: "32"
-log_every_n_steps: 50
-val_check_interval_steps: 2000
-checkpoint_every_n_steps: 2000
-save_top_k: 3
+# Model configuration
+model:
+  # Architecture (4 levels: 128→16→4→1) with smaller dimensions
+  architecture:
+    img_size_list: [128, 16, 4, 1]
+    embed_dim_list: [512, 512, 256, 128]    # Increased capacity
+    num_blocks_list: [8, 8, 4, 2]          # Increased depth
+    num_heads_list: [8, 8, 4, 2]           # Adjusted heads
+    attn_dropout: 0.1                      # Reduced dropout
+    proj_dropout: 0.1
+    init_std: 0.02
+    input_channels: 2
+    cond_dim: 0
+    max_bar_len: 64
+    compressed_dim: 64                     # Increased bottleneck width
+    compression_act: 'relu'
 
-# Visualization
-log_images_every_n_steps: 5000
-num_images_to_log: 4
+  # Generator configuration
+  generator:
+    generator_type_list: [ar, mar, mar, mar]
+    scan_order: column_major
+    mask_ratio_loc: 1.0                    # MAR: mean mask ratio
+    mask_ratio_scale: 0.8                   # MAR: std of mask ratio
+    full_mask_prob: 0.1                     # Probability of forcing 100% mask during training
+    ar_prefix_mask_ratio: 1.0               # AR: max prefix mask ratio (1.0 = can mask 100% of prefix)
+    num_conds: 5
 
-# Optimizer
+  # Training settings
+  training:
+    grad_checkpointing: false
+    v_weight: 1.0
+
+# Training configuration
+training:
+  max_steps: 200000                      
+  learning_rate: 1.0e-4
+  weight_decay: 0.05
+  warmup_steps: 2000                    
+  grad_clip: 3.0
+  accumulate_grad_batches: 1
+  train_batch_size: 64
+  val_batch_size: 8
+
+# Optimizer (Optional override or structure match)
 optimizer:
   lr: 1.0e-4
   betas: [0.9, 0.95]
   weight_decay: 0.05
 
-# Scheduler
+# Scheduler (Optional)
 scheduler:
   schedule_type: "cosine"
   warmup_steps: 2000
   min_lr: 1.0e-6
 
-# Model Architecture
-model:
-  # TFN Specifics
-  input_channels: 2
-  embed_dims: [512, 256, 128]
-  num_heads: [8, 4, 2]
-  num_blocks: [6, 4, 2]
-  cond_dim: 0
-  
-  # Legacy params (required by strict type checking if passed, ignored by model)
-  img_size_list: [128, 16, 4, 1]
-  generator_type_list: ["mar", "mar", "mar", "mar"]
+# Data configuration
+data:
+  train_data: dataset/pop909/train.txt
+  val_data: dataset/pop909/valid.txt
+  crop_length: 512                       
+  augment_factor: 10                      # Random crop augmentation factor
+  pitch_shift_min: -12                    # Minimum pitch shift (semitones)
+  pitch_shift_max: 12    
+  cache_in_memory: true
+  cache_dir: dataset/cache/pop909
 
+# Hardware configuration
+hardware:
+  devices: [0, 1]
+  num_workers: 24
+  prefetch_factor: 4
+  persistent_workers: true
+  pin_memory: true
+  precision: "32"
+
+# Logging and checkpointing
+logging:
+  output_dir: outputs/pop909_all_mar
+  log_every_n_steps: 50
+  val_check_interval_steps: 1000
+  checkpoint_every_n_steps: 1000
+  save_top_k: 3
+  log_images_every_n_steps: 1000
+  num_images_to_log: 2
+
+# Other
+seed: 42
+fast_dev_run: false

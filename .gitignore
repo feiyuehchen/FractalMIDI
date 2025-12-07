@@ -1,6 +1,6 @@
 # Training outputs
 outputs/
-inference/
+outputs_old/
 *.npz
 cache/
 
