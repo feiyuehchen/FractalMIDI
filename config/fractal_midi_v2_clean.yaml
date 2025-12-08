@@ -1,4 +1,4 @@
-# FractalMIDI 2.0 Configuration
+# FractalMIDI 2.0 Configuration (Cleaned)
 # Architecture: Tempo-Aware Temporal Fractal Network (TFN)
 
 # Model configuration
@@ -13,13 +13,13 @@ model:
     seq_len_list: [32, 64, 128, 512]
     
     # Hidden Dimension for each level
-    embed_dim_list: [512, 512, 256, 128]    
+    embed_dim_list: [256, 256, 128, 128]    
     
     # Transformer Depth (Number of Blocks)
-    num_blocks_list: [8, 8, 4, 2]          
+    num_blocks_list: [4, 4, 2, 1]          
     
     # Number of Attention Heads
-    num_heads_list: [8, 8, 4, 2]           
+    num_heads_list: [4, 4, 2, 1]           
     
     attn_dropout: 0.1                      
     proj_dropout: 0.1
@@ -35,14 +35,18 @@ model:
     # Hybrid Strategy: Structure (MAR) -> Content (AR)
     # MAR: Bidirectional context for global structure (Density/Tempo)
     # AR:  Unidirectional context with LSTM Decoder for coherent notes/chords
-    generator_type_list: [ar, ar, ar, ar]
+    generator_type_list: [mar, mar, mar, mar]
     
-    scan_order: row_major # Used for AR steps if flexible order is implemented
-    mask_ratio_loc: 1.0                    # MAR: mean mask ratio
-    mask_ratio_scale: 0.8                   # MAR: std of mask ratio
-    full_mask_prob: 0.1                     # Probability of forcing 100% mask during training
-    ar_prefix_mask_ratio: 1.0               # AR: max prefix mask ratio
-    num_conds: 5
+    # Pitch Decoding Strategy: 'ar' (Sequential) or 'parallel' (Efficient O(1))
+    pitch_generator_type: 'parallel'
+    
+    # Note: The following parameters are currently NOT used in the simplified FractalGen implementation
+    # scan_order: row_major 
+    # mask_ratio_loc: 1.0                    
+    # mask_ratio_scale: 0.8                   
+    # full_mask_prob: 0.1                     
+    # ar_prefix_mask_ratio: 1.0               
+    # num_conds: 5
 
   # Training settings
   training:
@@ -51,20 +55,20 @@ model:
 
 # Training configuration
 training:
-  max_steps: 100000                      
-  learning_rate: 1.0e-4
-  weight_decay: 0.05
-  warmup_steps: 2000                    
+  max_steps: 100000                     
+  learning_rate: 3e-4
+  weight_decay: 2e-3
+  warmup_steps: 5000                 
   grad_clip: 3.0
   accumulate_grad_batches: 1
-  train_batch_size: 64
-  val_batch_size: 8
+  train_batch_size: 32
+  val_batch_size: 16
 
 # Optimizer
 optimizer:
-  lr: 1.0e-4
+  lr: 5e-4
   betas: [0.9, 0.95]
-  weight_decay: 0.05
+  weight_decay: 2e-3
 
 # Scheduler
 scheduler:
@@ -80,13 +84,13 @@ data:
   augment_factor: 10                      # Random crop augmentation factor
   pitch_shift_min: -12                    # Minimum pitch shift (semitones)
   pitch_shift_max: 12    
-  cache_in_memory: true
+  cache_in_memory: false
   cache_dir: dataset/cache/pop909
 
 # Hardware configuration
 hardware:
   devices: [0, 1]
-  num_workers: 24
+  num_workers: 8
   prefetch_factor: 4
   persistent_workers: true
   pin_memory: true
@@ -94,14 +98,15 @@ hardware:
 
 # Logging and checkpointing
 logging:
-  output_dir: experiments/pop909_all_ar
+  output_dir: experiments/pop909_mar_parallel
   log_every_n_steps: 50
-  val_check_interval_steps: 1000
+  val_check_interval_steps: 5000
   checkpoint_every_n_steps: 10000
   save_top_k: 3
-  log_images_every_n_steps: 1000
+  log_images_every_n_steps: 5000
   num_images_to_log: 2
 
 # Other
 seed: 42
 fast_dev_run: false
+

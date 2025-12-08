@@ -340,17 +340,26 @@ class ModelManager:
         config = self.current_config
         
         img_size_list = None
+        seq_len_list = None
         embed_dim_list = None
         num_blocks_list = None
         generator_type_list = None
         
         if config:
             if hasattr(config, 'architecture'):
-                img_size_list = config.architecture.img_size_list
+                # Handle renamed attribute: img_size_list -> seq_len_list
+                if hasattr(config.architecture, 'seq_len_list'):
+                    seq_len_list = config.architecture.seq_len_list
+                    img_size_list = seq_len_list # For backward compatibility
+                elif hasattr(config.architecture, 'img_size_list'):
+                    img_size_list = config.architecture.img_size_list
+                    seq_len_list = img_size_list
+                
                 embed_dim_list = config.architecture.embed_dim_list
                 num_blocks_list = config.architecture.num_blocks_list
             else:
-                img_size_list = getattr(config, 'img_size_list', None)
+                seq_len_list = getattr(config, 'seq_len_list', None)
+                img_size_list = getattr(config, 'img_size_list', seq_len_list)
                 embed_dim_list = getattr(config, 'embed_dim_list', None)
                 num_blocks_list = getattr(config, 'num_blocks_list', None)
                 
@@ -368,6 +377,7 @@ class ModelManager:
             "device": self.device,
             "config": {
                 "img_size_list": img_size_list,
+                "seq_len_list": seq_len_list,
                 "embed_dim_list": embed_dim_list,
                 "num_blocks_list": num_blocks_list,
                 "generator_type_list": generator_type_list,

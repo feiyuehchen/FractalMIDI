@@ -15,9 +15,17 @@ Usage:
 import argparse
 from pathlib import Path
 import sys
+import torch
 
 # Add code to path
 sys.path.append(str(Path(__file__).parent))
+
+# Optimize for RTX 4090/Ampere+
+if torch.cuda.is_available():
+    torch.set_float32_matmul_precision('high')
+    torch.backends.cudnn.benchmark = True  # Enable cuDNN auto-tuner
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -185,7 +193,7 @@ def main():
     val_batches = len(val_loader)
     val_interval_steps = args.val_check_interval_steps
     trainer_val_check_interval, trainer_check_val_every_n_epoch = compute_validation_schedule(
-        train_batches, val_interval_steps
+        train_batches, val_interval_steps, args.accumulate_grad_batches
     )
     
     # Print training summary

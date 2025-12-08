@@ -134,6 +134,15 @@ def piano_roll_to_image(piano_roll: Union[torch.Tensor, np.ndarray],
         elif shape[1] == 128: # (B, 128, T) - Legacy
             is_batched = True
             batch_size, height, width = shape
+        elif shape[1] == 2 or shape[1] == 3: # (B, C, T, 128)? Or (B, C, T)?
+             # This happens if we passed (B, 2, T, 128)
+             if ndim == 4 and shape[3] == 128:
+                 is_batched = True
+                 is_3channel = True
+                 batch_size, channels, time_steps, pitch_bins = shape
+             else:
+                 # Fallback or error
+                 pass
         else: # (C, H, W) legacy single item or something else
              # Assume legacy (128, T) unbatched
              piano_roll_np = piano_roll_np[np.newaxis, ...]
@@ -337,12 +346,11 @@ def visualize_batch(piano_rolls: torch.Tensor,
 
 def create_growth_animation(intermediates: List[torch.Tensor],
                             save_path: Optional[Union[str, Path]] = None,
-                            fps: int = 30,
-                            transition_duration: float = 0.1,
-                            final_hold: float = 1.0,
+                            fps: int = 20,
+                            transition_duration: float = 0.8,
+                            final_hold: float = 2.0,
                             min_height: int = 512,
                             optimize: bool = True,
-                            quality: int = 95,
                             easing: str = "ease_in_out_cubic",
                             pop_effect: bool = False,
                             show_grid: bool = False,
@@ -415,6 +423,8 @@ def create_growth_animation(intermediates: List[torch.Tensor],
 
         # Detect diff
         diff = (next_step - current).clamp(min=0) if pop_effect else None
+        if diff is not None:
+             diff = diff.to(current.device)
         
         for f in range(frames_per_transition):
             t = f / frames_per_transition
@@ -424,6 +434,8 @@ def create_growth_animation(intermediates: List[torch.Tensor],
             
             if pop_effect and f < frames_per_transition // 2 and diff is not None:
                 pop_intensity = (1 - 2 * t) * 0.3
+                # Ensure diff is on same device as interpolated
+                diff = diff.to(interpolated.device)
                 interpolated = interpolated + diff * pop_intensity
                 interpolated = torch.clamp(interpolated, min=-1.0, max=1.0)
             
@@ -479,8 +491,7 @@ def create_growth_animation(intermediates: List[torch.Tensor],
                 save_all=True,
                 duration=1000 // fps,
                 loop=0,
-                optimize=optimize,
-                quality=quality
+                optimize=optimize
             )
         return None
     

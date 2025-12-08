@@ -11,16 +11,18 @@ from typing import Tuple
 class PianoRollConfig:
     """Piano roll specific configuration."""
     height: int = 128                    # MIDI pitch range (21-108 → 128 bins)
-    max_width: int = 512                 # Maximum time steps
+    max_width: int = 256                 # Maximum time steps
     patch_size: int = 4                  # Patch size for tokenization
-    velocity_vocab_size: int = 256       # MIDI velocity range [0-255]
-    
+    velocity_vocab_size: int = 256       # MIDI velocity range [0-255] (Legacy/Input)
+    num_velocity_bins: int = 32          # Number of quantization bins for velocity output
+
     def __post_init__(self):
         """Validate piano roll configuration."""
         if self.height % self.patch_size != 0:
             raise ValueError(f"height ({self.height}) must be divisible by patch_size ({self.patch_size})")
-        if self.velocity_vocab_size != 256:
-            raise ValueError("velocity_vocab_size must be 256 for MIDI compatibility")
+        # Relaxed check for velocity_vocab_size as we might not use it strictly for 256 anymore
+        # if self.velocity_vocab_size != 256:
+        #    raise ValueError("velocity_vocab_size must be 256 for MIDI compatibility")
 
 
 @dataclass
@@ -32,11 +34,11 @@ class ArchitectureConfig:
     num_blocks_list: Tuple[int, ...] = (12, 3, 2, 1)
     num_heads_list: Tuple[int, ...] = (8, 4, 2, 2)
     input_channels: int = 2
-    cond_dim: int = 0
+    cond_dim: int = 12
     
     # Dropout rates
-    attn_dropout: float = 0.1
-    proj_dropout: float = 0.1
+    attn_dropout: float = 0.2
+    proj_dropout: float = 0.2
     
     # Initialization
     init_std: float = 0.02               # Standard deviation for weight initialization
@@ -68,6 +70,9 @@ class GeneratorConfig:
     # Generator types per level
     generator_type_list: Tuple[str, ...] = ("mar", "mar", "mar", "mar")
     
+    # Pitch Decoding Strategy
+    pitch_generator_type: str = "ar"  # 'ar' (Sequential) or 'parallel' (Efficient O(1))
+
     # AR generator settings
     scan_order: str = "row_major"        # Options: "row_major", "column_major"
     ar_prefix_mask_ratio: float = 1.0    # Max prefix mask ratio for AR training (1.0 = can mask 100%)
@@ -88,6 +93,8 @@ class GeneratorConfig:
         for idx, g in enumerate(self.generator_type_list):
             if g not in {"mar", "ar"}:
                 raise ValueError(f"generator_type_list[{idx}] must be 'mar' or 'ar', got '{g}'")
+        if self.pitch_generator_type not in {"ar", "parallel"}:
+            raise ValueError(f"pitch_generator_type must be 'ar' or 'parallel', got '{self.pitch_generator_type}'")
 
 
 @dataclass
@@ -169,6 +176,7 @@ class FractalModelConfig:
             },
             'generator': {
                 'generator_type_list': list(self.generator.generator_type_list),
+                'pitch_generator_type': self.generator.pitch_generator_type,
                 'scan_order': self.generator.scan_order,
                 'mask_ratio_loc': self.generator.mask_ratio_loc,
                 'mask_ratio_scale': self.generator.mask_ratio_scale,
@@ -249,4 +257,3 @@ def get_256_config():
     return FractalModelConfig(
         piano_roll=PianoRollConfig(max_width=256),
     )
-

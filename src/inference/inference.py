@@ -379,7 +379,7 @@ def main():
                         tempo_curve = np.interp(
                             np.linspace(0, len(tempo_low), args.generation_length),
                             np.arange(len(tempo_low)),
-                            tempo_low.numpy()
+                            tempo_low.cpu().numpy()  
                         )
                         break
             
@@ -433,7 +433,7 @@ def main():
                     if isinstance(item, dict) and 'output' in item and not item.get('is_structure', False):
                         frame = item['output'][0] 
                         T_frame = frame.shape[1]
-                        tempo_frm = torch.ones(1, T_frame, 128) * 0.5
+                        tempo_frm = torch.ones(1, T_frame, 128, device=frame.device) * 0.5
                         full_frame = torch.cat([frame, tempo_frm], dim=0)
                         content_intermediates.append({'output': full_frame.unsqueeze(0)})
                 

@@ -235,7 +235,4 @@ class PianoRollVelocityLoss(nn.Module):
         return velocity_values
 
 
-# ==============================================================================
-# Hierarchical FractalGen Model
-# ==============================================================================
 

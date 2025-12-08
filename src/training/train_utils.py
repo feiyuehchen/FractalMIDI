@@ -188,7 +188,7 @@ def merge_config_with_args(config_dict, args):
     if hasattr(args, 'max_bar_len') and args.max_bar_len != 64: full_config.model.architecture.max_bar_len = args.max_bar_len
     if hasattr(args, 'compressed_dim') and args.compressed_dim != 32: full_config.model.architecture.compressed_dim = args.compressed_dim
     if hasattr(args, 'compression_act') and args.compression_act != 'relu': full_config.model.architecture.compression_act = args.compression_act
-
+    
     # Generator
     if args.generator_types != 'mar,mar,mar,mar':
         full_config.model.generator.generator_type_list = tuple(args.generator_types.split(','))
@@ -244,6 +244,7 @@ def merge_config_with_args(config_dict, args):
     merged.v_weight = full_config.model.training.v_weight
     
     merged.generator_types = ','.join(full_config.model.generator.generator_type_list)
+    merged.pitch_generator_type = full_config.model.generator.pitch_generator_type
     merged.scan_order = full_config.model.generator.scan_order
     merged.mask_ratio_loc = full_config.model.generator.mask_ratio_loc
     merged.mask_ratio_scale = full_config.model.generator.mask_ratio_scale
@@ -441,6 +442,10 @@ def setup_trainer_config(args):
     config.model.generator.mask_ratio_scale = args.mask_ratio_scale
     config.model.generator.full_mask_prob = args.full_mask_prob
     
+    # Set pitch generator type from args if available
+    if hasattr(args, 'pitch_generator_type'):
+        config.model.generator.pitch_generator_type = args.pitch_generator_type
+    
     # Set model architecture from config
     config.model.architecture.seq_len_list = args.seq_len_list
     config.model.architecture.embed_dim_list = args.embed_dim_list
@@ -530,13 +535,19 @@ def setup_dataloaders(args):
     return train_loader, val_loader
 
 
-def compute_validation_schedule(train_batches, val_interval_steps):
+def compute_validation_schedule(train_batches, val_interval_steps, accumulate_grad_batches=1):
     """
     Compute PyTorch Lightning validation schedule parameters.
+    val_interval_steps: Number of global optimization steps between validations.
     """
     train_batches = max(1, train_batches)
     val_interval_steps = max(1, val_interval_steps)
-    quotient, remainder = divmod(val_interval_steps, train_batches)
+    accumulate_grad_batches = max(1, accumulate_grad_batches)
+    
+    # Convert global steps to batches
+    val_interval_batches = val_interval_steps * accumulate_grad_batches
+    
+    quotient, remainder = divmod(val_interval_batches, train_batches)
     if remainder == 0:
         trainer_val_check_interval = 1.0
         trainer_check_val_every_n_epoch = max(1, quotient)

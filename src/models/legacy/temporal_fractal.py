@@ -9,7 +9,7 @@ from .components import (
     AdaLN, AdaLNModulator, TimePositionalEmbedding, 
     FractalInputProj, FractalOutputProj, 
     StructureInputProj, StructureOutputProj,
-    LSTMOutputProj
+    LSTMOutputProj, PitchTransformerOutputProj
 )
 
 class FractalBlock(nn.Module):
@@ -73,7 +73,11 @@ class TemporalGenerator(nn.Module):
             self.output_proj = StructureOutputProj(embed_dim, input_channels)
         else:
             self.input_proj = FractalInputProj(input_channels, embed_dim, max_bar_len=max_bar_len)
-            self.output_proj = FractalOutputProj(embed_dim, input_channels)
+            # Use PitchTransformerOutputProj for better pitch modeling with RoPE
+            # For MAR, we also use it to generate coherent chords!
+            # For AR, we definitely use it.
+            # Using same hidden dim as embed_dim for simplicity
+            self.output_proj = PitchTransformerOutputProj(embed_dim, input_channels, hidden_dim=embed_dim)
 
         self.blocks = nn.ModuleList([
             FractalBlock(embed_dim, num_heads, cond_dim=cond_dim)
@@ -128,7 +132,12 @@ class TemporalGenerator(nn.Module):
 
     def forward(self, x, cond=None, mask=None, prev_emb=None, bar_pos=None, is_causal=False, use_sos=False):
         x_emb = self.forward_features(x, cond, mask, prev_emb, bar_pos, is_causal=is_causal, use_sos=use_sos)
-        logits = self.output_proj(x_emb) 
+        
+        # Pass target to output_proj if it supports teacher forcing (e.g. LSTM/Transformer Decoder)
+        if isinstance(self.output_proj, (LSTMOutputProj, PitchTransformerOutputProj)):
+             logits = self.output_proj(x_emb, target=x, teacher_forcing=True)
+        else:
+             logits = self.output_proj(x_emb) 
         return logits, x_emb
 
 class FractalLoss(nn.Module):
@@ -188,6 +197,7 @@ class TemporalFractalNetwork(nn.Module):
         
         self.levels = nn.ModuleList()
         self.cond_projs = nn.ModuleList()
+        self.global_cond_projs = nn.ModuleList() # Projections for global condition (Chroma) at higher levels
         
         num_levels = len(embed_dims)
         # Auto-configure downsample factors based on number of levels
@@ -205,6 +215,7 @@ class TemporalFractalNetwork(nn.Module):
         self.embed_dims = embed_dims
         self.generator_types = generator_type_list or ['mar'] * len(embed_dims)
         self.scan_order = scan_order
+        self.cond_dim = cond_dim
         
         self.compressed_dim = compressed_dim
         self.full_mask_prob = full_mask_prob
@@ -223,9 +234,20 @@ class TemporalFractalNetwork(nn.Module):
                     nn.Linear(embed_dims[i-1], compressed_dim),
                     act_layer
                 ))
+                # Project global condition (Chroma) to match compressed_dim for addition
+                if cond_dim > 0:
+                    self.global_cond_projs.append(nn.Sequential(
+                        nn.Linear(cond_dim, compressed_dim),
+                        act_layer
+                    ))
+                else:
+                    self.global_cond_projs.append(nn.Identity())
+                
                 level_cond_dim = compressed_dim
             else:
                 self.cond_projs.append(nn.Identity())
+                # Level 0 doesn't need projection if it takes raw cond_dim (handled by AdaLN)
+                self.global_cond_projs.append(nn.Identity())
                 level_cond_dim = cond_dim if cond_dim > 0 else None
             
             is_structure = (i == 0)
@@ -281,6 +303,20 @@ class TemporalFractalNetwork(nn.Module):
         res = torch.stack([c0, c1], dim=1)
         return res
 
+    def _downsample_chroma(self, chroma, factor):
+        # chroma: (B, T, C)
+        if factor == 1:
+            return chroma
+        
+        B, T, C = chroma.shape
+        if T % factor != 0:
+            pad_len = factor - (T % factor)
+            chroma = F.pad(chroma, (0, 0, 0, pad_len)) # Pads T dim
+            T = chroma.shape[1]
+            
+        chroma_reshaped = chroma.view(B, T // factor, factor, C)
+        return chroma_reshaped.mean(dim=2)
+
     def _upsample_embedding(self, emb, target_len):
         B, T_low, E = emb.shape
         emb_perm = emb.permute(0, 2, 1) 
@@ -314,10 +350,8 @@ class TemporalFractalNetwork(nn.Module):
             
             if i == 0: 
                 gt = self._downsample_structure(density, tempo, factor) 
-                level_cond = global_cond
             else: 
                 gt = self._downsample_content(notes, factor) 
-                level_cond = None 
             
             if bar_pos is not None:
                 level_bar_pos = self._downsample_bar_pos(bar_pos, factor)
@@ -327,14 +361,32 @@ class TemporalFractalNetwork(nn.Module):
             B = gt.shape[0]
             T = gt.shape[2] 
             
-            # Prepare conditioning from previous level
-            cond_emb = None
+            # Prepare conditioning
+            level_cond = None
+            
+            # 1. Global Condition (Chroma)
+            global_part = None
+            if global_cond is not None and self.cond_dim > 0:
+                # Downsample global cond to current resolution
+                curr_global_cond = self._downsample_chroma(global_cond, factor)
+                global_part = self.global_cond_projs[i](curr_global_cond)
+            
+            # 2. Inter-level Condition
+            inter_part = None
             if i > 0 and prev_level_emb is not None:
                 upsampled = self._upsample_embedding(prev_level_emb, T) 
-                cond_emb = self.cond_projs[i](upsampled) 
-                level_cond = cond_emb 
-            elif i == 0:
-                level_cond = global_cond
+                inter_part = self.cond_projs[i](upsampled) 
+            
+            # 3. Combine
+            if i == 0:
+                level_cond = global_part
+            else:
+                if inter_part is not None:
+                    level_cond = inter_part
+                    if global_part is not None:
+                        level_cond = level_cond + global_part
+                else:
+                    level_cond = global_part
 
             if level_mod.generator_type == 'mar':
                 # MAR: Random Masking
@@ -411,7 +463,8 @@ class TemporalFractalNetwork(nn.Module):
                initial_content=None, inpaint_mask=None,
                return_intermediates=False, callback=None,
                bar_pos=None, refinement_steps=3,
-               deep_sample_mask_ratio=0.3): # Configurable mask ratio
+               deep_sample_mask_ratio=0.3,
+               filter_threshold=0.5): # Added filter_threshold
         
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
@@ -480,34 +533,55 @@ class TemporalFractalNetwork(nn.Module):
                         # Respect mask_ratio for iterative refinement
                         mask = torch.rand(batch_size, current_len, device=device) < mask_ratio
 
-                    cond_emb = None
+                    # Prepare conditioning
                     level_cond = None
+                    
+                    # 1. Global Condition (Chroma)
+                    global_part = None
+                    if global_cond is not None and self.cond_dim > 0:
+                        curr_global_cond = self._downsample_chroma(global_cond, factor)
+                        global_part = self.global_cond_projs[i](curr_global_cond)
+                    
+                    # 2. Inter-level Condition
+                    inter_part = None
                     if i > 0 and prev_level_emb is not None:
                         upsampled = self._upsample_embedding(prev_level_emb, current_len)
-                        cond_emb = self.cond_projs[i](upsampled)
-                        level_cond = cond_emb
-                        # Capture influence: This cond_emb is derived from Level i-1 structure
-                        if step == 0: # Only capture once per level
+                        inter_part = self.cond_projs[i](upsampled)
+                        
+                        # Capture influence
+                        if step == 0: 
                             infl_data = {
                                 'level': i,
-                                'cond_map': cond_emb.detach().cpu() # (B, T, C)
+                                'cond_map': inter_part.detach().cpu()
                             }
                             condition_influence.append(infl_data)
                             if callback:
                                 callback({'type': 'condition_influence', 'data': infl_data})
-                    elif i == 0:
-                        level_cond = global_cond
                     
-                        # Pass 1: Conditional
-                        logits_cond, _ = level_mod(current_canvas, level_cond, mask, None, bar_pos=level_bar_pos)
-                        
-                        # CFG Logic
-                        if cfg != 1.0 and level_cond is not None:
-                            # Pass 2: Unconditional (cond=None)
-                            logits_uncond, _ = level_mod(current_canvas, None, mask, None, bar_pos=level_bar_pos)
-                            logits = logits_uncond + cfg * (logits_cond - logits_uncond)
+                    # 3. Combine
+                    if i == 0:
+                        level_cond = global_part
+                    else:
+                        if inter_part is not None:
+                            level_cond = inter_part
+                            if global_part is not None:
+                                level_cond = level_cond + global_part
                         else:
-                            logits = logits_cond
+                            level_cond = global_part
+                    
+                    # Pass 1: Conditional
+                    logits_cond, _ = level_mod(current_canvas, level_cond, mask, None, bar_pos=level_bar_pos)
+                    
+                    # CFG Logic
+                    if cfg != 1.0 and level_cond is not None:
+                        # Pass 2: Unconditional (cond=None)
+                        # For Unconditional, we should strictly pass None to level_mod
+                        # which will pass None to AdaLN, which will do Identity.
+                        # This is correct for "No Condition".
+                        logits_uncond, _ = level_mod(current_canvas, None, mask, None, bar_pos=level_bar_pos)
+                        logits = logits_uncond + cfg * (logits_cond - logits_uncond)
+                    else:
+                        logits = logits_cond
                     
                     if i == 0:
                         pred = torch.clamp(logits, 0, 1)
@@ -525,20 +599,33 @@ class TemporalFractalNetwork(nn.Module):
             # === AR Generation with CFG ===
             elif level_mod.generator_type == 'ar':
                 # AR Sampling
-                cond_emb = None
+                # Prepare conditioning
                 level_cond = None
+                global_part = None
+                if global_cond is not None and self.cond_dim > 0:
+                    curr_global_cond = self._downsample_chroma(global_cond, factor)
+                    global_part = self.global_cond_projs[i](curr_global_cond)
+                
+                inter_part = None
                 if i > 0 and prev_level_emb is not None:
                     upsampled = self._upsample_embedding(prev_level_emb, current_len)
-                    cond_emb = self.cond_projs[i](upsampled)
-                    level_cond = cond_emb
+                    inter_part = self.cond_projs[i](upsampled)
                     
                     infl_data = {
                         'level': i,
-                        'cond_map': cond_emb.detach().cpu()
+                        'cond_map': inter_part.detach().cpu()
                     }
                     condition_influence.append(infl_data)
-                elif i == 0:
-                    level_cond = global_cond
+                
+                if i == 0:
+                    level_cond = global_part
+                else:
+                    if inter_part is not None:
+                        level_cond = inter_part
+                        if global_part is not None:
+                            level_cond = level_cond + global_part
+                    else:
+                        level_cond = global_part
 
                 # Loop T
                 for t in range(current_len):
@@ -557,8 +644,8 @@ class TemporalFractalNetwork(nn.Module):
                     curr_cond = level_cond[:, :t+1] if level_cond is not None and level_cond.size(1) == current_len else level_cond
                     curr_bar_pos = level_bar_pos[:, :t+1] if level_bar_pos is not None else None
                     
-                    if isinstance(level_mod.output_proj, LSTMOutputProj):
-                        # LSTM + CFG
+                    if isinstance(level_mod.output_proj, (LSTMOutputProj, PitchTransformerOutputProj)):
+                        # Decoder-based generation
                         # Pass 1: Conditional
                         _, x_emb_cond = level_mod(
                             inp, curr_cond, 
@@ -576,18 +663,18 @@ class TemporalFractalNetwork(nn.Module):
                             )
                             emb_t_uncond = x_emb_uncond[:, -1:, :] # (B, 1, E)
                             
-                            # Combine Embeddings? OR Combine Logits?
-                            # For LSTM, combining embeddings before feeding to LSTM is more robust than mixing logits inside the loop.
-                            # Because LSTM state evolves based on input.
-                            # However, standard CFG mixes logits.
-                            # If we mix embeddings: emb_final = emb_uncond + cfg * (emb_cond - emb_uncond)
-                            # Then feed to LSTM. This is "Guidance at Feature Level".
+                            # Guidance at Feature Level
                             emb_t = emb_t_uncond + cfg * (emb_t_cond - emb_t_uncond)
                         else:
                             emb_t = emb_t_cond
                         
-                        # Sample using LSTM
-                        last_logit = level_mod.sample_output(emb_t, temperature=temperature) # (B, 1, 2, 128)
+                        # Sample using Decoder
+                        if hasattr(level_mod.output_proj, 'sample'):
+                            last_logit = level_mod.output_proj.sample(emb_t, temperature=temperature) # (B, 1, 2, 128)
+                        else:
+                            # Fallback 
+                            last_logit = level_mod.output_proj(emb_t, teacher_forcing=False)
+
                         last_logit = last_logit.squeeze(1) # (B, 2, 128)
                         
                     else:
@@ -626,6 +713,10 @@ class TemporalFractalNetwork(nn.Module):
                         # Sampling strategy
                         if temperature > 0:
                              probs = torch.sigmoid(logits_note / temperature)
+                             # Apply filter threshold to reduce noise
+                             if filter_threshold > 0:
+                                 probs = torch.where(probs < filter_threshold, torch.zeros_like(probs), probs)
+                             
                              pred_note = torch.bernoulli(probs)
                         else:
                              pred_note = (logits_note > 0).float()
@@ -668,11 +759,24 @@ class TemporalFractalNetwork(nn.Module):
                     if level_inpaint_mask is not None:
                         refine_mask = refine_mask & (level_inpaint_mask > 0.5)
                     
-                    cond_emb = None
+                    # Recalculate condition (could be cached but cheap enough)
+                    level_cond = None
+                    global_part = None
+                    if global_cond is not None and self.cond_dim > 0:
+                        curr_global_cond = self._downsample_chroma(global_cond, factor)
+                        global_part = self.global_cond_projs[i](curr_global_cond)
+                    
+                    inter_part = None
                     if prev_level_emb is not None:
                         upsampled = self._upsample_embedding(prev_level_emb, current_len)
-                        cond_emb = self.cond_projs[i](upsampled)
-                        level_cond = cond_emb
+                        inter_part = self.cond_projs[i](upsampled)
+                    
+                    if inter_part is not None:
+                        level_cond = inter_part
+                        if global_part is not None:
+                            level_cond = level_cond + global_part
+                    else:
+                        level_cond = global_part
                     
                     # Refinement also benefits from CFG
                     logits_cond, _ = level_mod(current_canvas, level_cond, refine_mask, None, bar_pos=level_bar_pos)
@@ -705,14 +809,26 @@ class TemporalFractalNetwork(nn.Module):
             # For AR models, this is "Teacher Forcing Condition Extraction" equivalent (but on generated data)
             mask = torch.zeros(batch_size, current_len, dtype=torch.bool, device=device)
             
-            cond_emb = None
             level_cond = None
+            global_part = None
+            if global_cond is not None and self.cond_dim > 0:
+                curr_global_cond = self._downsample_chroma(global_cond, factor)
+                global_part = self.global_cond_projs[i](curr_global_cond)
+            
+            inter_part = None
             if i > 0 and prev_level_emb is not None:
                 upsampled = self._upsample_embedding(prev_level_emb, current_len)
-                cond_emb = self.cond_projs[i](upsampled)
-                level_cond = cond_emb
-            elif i == 0:
-                level_cond = global_cond
+                inter_part = self.cond_projs[i](upsampled)
+            
+            if i == 0:
+                level_cond = global_part
+            else:
+                if inter_part is not None:
+                    level_cond = inter_part
+                    if global_part is not None:
+                        level_cond = level_cond + global_part
+                else:
+                    level_cond = global_part
             
             # Non-causal pass for embedding
             _, x_emb = level_mod(

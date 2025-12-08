@@ -135,6 +135,9 @@ class GenerationRequest(BaseModel):
     create_gif: bool = Field(True, description="Whether to create GIF animation")
     show_progress: bool = Field(True, description="Show progress indicator in GIF")
     show_grid: bool = Field(False, description="Show grid in GIF")
+    
+    # Sampling control
+    filter_threshold: float = Field(0.0, description="Threshold for filtering low-probability notes (0.0 to disable)")
 
 
 class GenerationResponse(BaseModel):

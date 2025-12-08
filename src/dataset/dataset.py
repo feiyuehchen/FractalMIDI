@@ -23,7 +23,7 @@ class MIDIDatasetConfig:
     random_crop: bool = True  # Enable random cropping for data augmentation
     crop_length: int = 256  # Target length in 16th notes (if random_crop=True)
     min_length: int = 64  # Minimum length for a valid crop
-    augment_factor: int = 1  # How many random crops per MIDI file (effective dataset size multiplier)
+    augment_factor: int = 5  # How many random crops per MIDI file (effective dataset size multiplier)
     pad_to_multiple: int = 4  # Ensure output length is multiple of this value
     cache_in_memory: bool = True  # Cache piano rolls in RAM to avoid repeated decoding
     cache_dir: Optional[str] = None  # Optional directory for on-disk cache (npz)
@@ -255,7 +255,7 @@ class MIDIDataset(Dataset):
             print(f"Warning: Failed to write cache {cache_path}: {exc}")
             self._failed_cache_paths.add(cache_path)
 
-    def _build_piano_roll(self, file_path: str) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    def _build_piano_roll(self, file_path: str) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         """
         Build piano roll components from MIDI file.
         Returns: 
@@ -263,6 +263,7 @@ class MIDIDataset(Dataset):
             tempo: (T,) - Normalized Tempo
             density: (T,) - Note Density
             bar_pos: (T,) - Bar Position
+            chroma: (T, 12) - Pitch Class Profile
         """
         try:
             score = symusic.Score(file_path)
@@ -298,6 +299,9 @@ class MIDIDataset(Dataset):
                     note_layer[start_step:end_step, pitch] = 1.0
                     # Use max to handle overlapping notes in same track (monophonic assumption per pitch per track usually, but here we merge)
                     vel_layer[start_step:end_step, pitch] = np.maximum(vel_layer[start_step:end_step, pitch], velocity)
+
+        # Calculate Chroma (Harmonic Feature)
+        chroma_layer = self._compute_chroma(note_layer, vel_layer)
 
         # Calculate Density (Notes per step normalized)
         # Simple count of active notes at each step
@@ -346,7 +350,40 @@ class MIDIDataset(Dataset):
 
         # Stack Note/Vel to (2, T, 128)
         notes_roll = np.stack([note_layer, vel_layer], axis=0)
-        return notes_roll, tempo_layer, density_layer, bar_pos_layer
+        return notes_roll, tempo_layer, density_layer, bar_pos_layer, chroma_layer
+
+    @staticmethod
+    def _compute_chroma(note_layer: np.ndarray, vel_layer: np.ndarray, window_size: int = 8) -> np.ndarray:
+        """
+        Compute Chroma (Pitch Class Profile) features.
+        Args:
+            note_layer: (T, 128)
+            vel_layer: (T, 128)
+            window_size: Smoothing window size
+        Returns:
+            chroma: (T, 12)
+        """
+        T = note_layer.shape[0]
+        chroma = np.zeros((T, 12), dtype=np.float32)
+        
+        # 1. Fold to 12 pitch classes
+        for p in range(128):
+            pc = p % 12
+            chroma[:, pc] += vel_layer[:, p]
+            
+        # 2. Smooth over time (Moving Average)
+        if window_size > 1 and T >= window_size:
+            # Simple moving average along time axis
+            # Pad to keep size same
+            kernel = np.ones(window_size) / window_size
+            for c in range(12):
+                chroma[:, c] = np.convolve(chroma[:, c], kernel, mode='same')
+        
+        # 3. Normalize
+        max_vals = chroma.max(axis=1, keepdims=True) + 1e-6
+        chroma = chroma / max_vals
+        
+        return chroma
 
     def _get_or_create_roll(self, file_idx: int, file_path: str, store_in_memory: bool) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         roll = None
@@ -370,20 +407,21 @@ class MIDIDataset(Dataset):
 
         return roll
 
-    def _get_piano_roll(self, file_idx: int, file_path: str) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    def _get_piano_roll(self, file_idx: int, file_path: str) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         data = self._get_or_create_roll(file_idx, file_path, store_in_memory=self.cache_in_memory)
         if data is None:
             return None
         # Return copies
-        return (data[0].copy(), data[1].copy(), data[2].copy(), data[3].copy())
+        return (data[0].copy(), data[1].copy(), data[2].copy(), data[3].copy(), data[4].copy())
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         """
         Returns:
             notes: (2, T, 128)
             tempo: (T,)
             density: (T,)
             bar_pos: (T,)
+            chroma: (T, 12)
             duration: int
             shift: int
         """
@@ -407,9 +445,9 @@ class MIDIDataset(Dataset):
             if data is None:
                 raise RuntimeError("Failed to construct piano roll")
 
-            notes, tempo, density, bar_pos = data
+            notes, tempo, density, bar_pos, chroma = data
             
-            # Shape notes: (2, T, 128), tempo: (T,), density: (T,), bar_pos: (T,)
+            # Shape notes: (2, T, 128), tempo: (T,), density: (T,), bar_pos: (T,), chroma: (T, 12)
             duration_steps = notes.shape[1]
             
             # Apply random cropping if enabled
@@ -432,6 +470,7 @@ class MIDIDataset(Dataset):
                     tempo = tempo[start_idx:start_idx + self.crop_length]
                     density = density[start_idx:start_idx + self.crop_length]
                     bar_pos = bar_pos[start_idx:start_idx + self.crop_length]
+                    chroma = chroma[start_idx:start_idx + self.crop_length, :]
                     duration_steps = self.crop_length
                 # If duration_steps <= crop_length, keep full sequence
             elif self.crop_length is not None and self.crop_length > 0:
@@ -442,6 +481,7 @@ class MIDIDataset(Dataset):
                     tempo = tempo[:self.crop_length]
                     density = density[:self.crop_length]
                     bar_pos = bar_pos[:self.crop_length]
+                    chroma = chroma[:self.crop_length, :]
                     duration_steps = self.crop_length
                 elif duration_steps < self.crop_length:
                     # Pad to crop_length if shorter
@@ -458,6 +498,9 @@ class MIDIDataset(Dataset):
                     density_pad = np.zeros(pad_len, dtype=density.dtype)
                     density = np.concatenate([density, density_pad], axis=0)
                     
+                    chroma_pad = np.zeros((pad_len, 12), dtype=chroma.dtype)
+                    chroma = np.concatenate([chroma, chroma_pad], axis=0)
+                    
                     # Continue bar pos sequence or pad 0
                     if duration_steps > 0:
                         last_val = bar_pos[-1]
@@ -473,6 +516,8 @@ class MIDIDataset(Dataset):
             shift = self.pitch_shifts[pitch_variant_idx] if self.pitch_shifts else 0
             if shift != 0:
                 notes = self._apply_pitch_shift(notes, shift)
+                # Chroma also needs shifting!
+                chroma = self._apply_chroma_shift(chroma, shift)
 
             # Pad to ensure length is multiple of pad_to_multiple
             if self.pad_to_multiple > 1 and duration_steps > 0:
@@ -481,30 +526,15 @@ class MIDIDataset(Dataset):
                     pad_width = padded_length - duration_steps
                     # Pad along dim 1 (time) for notes
                     notes = np.pad(notes, ((0, 0), (0, pad_width), (0, 0)), mode='constant')
-                    # Pad along dim 0 (time) for tempo/density/bar_pos
-                    tempo = np.pad(tempo, (0, pad_width), mode='edge') # Pad tempo with edge value
-                    density = np.pad(density, (0, pad_width), mode='constant') # Pad density with 0
+                    # Pad along dim 0 (time) for others
+                    tempo = np.pad(tempo, (0, pad_width), mode='edge') 
+                    density = np.pad(density, (0, pad_width), mode='constant')
+                    chroma = np.pad(chroma, ((0, pad_width), (0, 0)), mode='constant')
                     
-                    # Pad bar_pos continue the sequence - use modulo based on last seen value or naive continuation
-                    # For complex meters, naive continuation might break if we cross a bar boundary and TS changes.
-                    # However, since we don't have TS info here easily (lost in bar_pos), we'll try to infer cycle.
-                    # Or safer: Pad with 0? Or Pad with Edge?
-                    # Padding with continuation of the cycle logic is best if we assume constant TS at the end.
-                    
-                    # Heuristic: Look at the last few values to guess step.
                     last_val = bar_pos[-1]
-                    second_last = bar_pos[-2] if len(bar_pos) > 1 else last_val - 1
-                    step = last_val - second_last
-                    if step <= 0: step = 1 # Fallback
-                    
-                    # We don't know the current bar length (TS), but we know the max is max_bar_len or the wrap point.
-                    # Let's just assume the current bar length continues.
-                    # If last_val is 15, next might be 0 or 16? 
-                    # Let's just pad with 0s for safety or replicate edge.
-                    # Replicating edge is bad for position.
-                    # Let's extend assuming 4/4 (modulo 16) as a fallback for padding area which is usually ignored anyway.
-                    pad_bar_pos = ((last_val + 1 + np.arange(pad_width)) % 16).astype(np.int64)
-                    bar_pos = np.concatenate([bar_pos, pad_bar_pos])
+                    pad_pos_seq = np.arange(1, pad_width + 1, dtype=bar_pos.dtype)
+                    pad_bar_pos_vals = (last_val + pad_pos_seq) % 16
+                    bar_pos = np.concatenate([bar_pos, pad_bar_pos_vals])
                     
                     duration_steps = padded_length
             elif duration_steps == 0:
@@ -513,8 +543,9 @@ class MIDIDataset(Dataset):
                 tempo = np.zeros((duration_steps,), dtype=np.float32)
                 density = np.zeros((duration_steps,), dtype=np.float32)
                 bar_pos = np.zeros((duration_steps,), dtype=np.int64)
+                chroma = np.zeros((duration_steps, 12), dtype=np.float32)
 
-            return torch.from_numpy(notes), torch.from_numpy(tempo), torch.from_numpy(density), torch.from_numpy(bar_pos), duration_steps, shift
+            return torch.from_numpy(notes), torch.from_numpy(tempo), torch.from_numpy(density), torch.from_numpy(bar_pos), torch.from_numpy(chroma), duration_steps, shift
             
         except Exception as e:
             print(f"Error loading {file_path}: {e}")
@@ -528,7 +559,15 @@ class MIDIDataset(Dataset):
                     torch.zeros((fallback_length,), dtype=torch.float32),
                     torch.zeros((fallback_length,), dtype=torch.float32),
                     torch.zeros((fallback_length,), dtype=torch.long),
+                    torch.zeros((fallback_length, 12), dtype=torch.float32),
                     fallback_length, 0)
+    
+    @staticmethod
+    def _apply_chroma_shift(chroma: np.ndarray, shift: int) -> np.ndarray:
+        # chroma: (T, 12)
+        # Shift along axis 1
+        # roll
+        return np.roll(chroma, shift, axis=1)
     
     def get_duration(self, idx: int) -> int:
         """Get duration of a specific file."""
@@ -706,13 +745,13 @@ class BucketBatchSampler(Sampler):
         return count
 
 
-def collate_fn_pad(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]], 
+def collate_fn_pad(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]], 
                    patch_size: int = 32):
     """
     Collate function that pads components to the same length within a batch.
     
     Args:
-        batch: List of (notes, tempo, density, bar_pos, duration, shift) tuples
+        batch: List of (notes, tempo, density, bar_pos, chroma, duration, shift) tuples
         patch_size: Size of patches (default: 32).
     
     Returns:
@@ -720,25 +759,24 @@ def collate_fn_pad(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, t
         tempo_batch: (B, T)
         density_batch: (B, T)
         bar_pos_batch: (B, T)
+        chroma_batch: (B, T, 12)
         durations: (B,)
         shifts: (B,)
     """
     # Unpack batch
-    # batch item: (notes, tempo, density, bar_pos, duration, shift)
-    if len(batch[0]) == 6:
+    if len(batch[0]) == 7:
+        notes_list, tempo_list, density_list, bar_pos_list, chroma_list, durations, shifts = zip(*batch)
+    elif len(batch[0]) == 6:
+        # Backward compatibility check
+        # Could be (notes, tempo, density, bar_pos, duration, shift)
+        # We need to construct dummy chroma
         notes_list, tempo_list, density_list, bar_pos_list, durations, shifts = zip(*batch)
-    elif len(batch[0]) == 5:
-        # Backward compatibility or missing shift?
-        # Check types to be safe, but usually we just added bar_pos
-        # If user has old code calling this, it might break.
-        # Let's assume it is (notes, tempo, density, bar_pos, duration)
-        # Wait, __getitem__ returns 6 items now.
-        notes_list, tempo_list, density_list, bar_pos_list, durations = zip(*batch)
-        shifts = None
+        chroma_list = [torch.zeros(n.shape[1], 12) for n in notes_list]
     else:
-         # Fallback for safety
+        # Extremely fallback
         notes_list, tempo_list, density_list, durations = zip(*batch)
-        bar_pos_list = [torch.zeros_like(d) for d in density_list] # Dummy
+        bar_pos_list = [torch.zeros(n.shape[1]) for n in notes_list]
+        chroma_list = [torch.zeros(n.shape[1], 12) for n in notes_list]
         shifts = None
 
     max_duration = max(durations)
@@ -748,12 +786,14 @@ def collate_fn_pad(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, t
     padded_tempos = []
     padded_densities = []
     padded_bar_pos = []
+    padded_chromas = []
     
     for i in range(len(notes_list)):
         curr_notes = notes_list[i] # (2, T, 128)
         curr_tempo = tempo_list[i] # (T,)
         curr_density = density_list[i] # (T,)
         curr_bar_pos = bar_pos_list[i] # (T,)
+        curr_chroma = chroma_list[i]   # (T, 12)
         current_len = curr_notes.shape[1]
         
         pad_len = padded_duration - current_len
@@ -776,24 +816,30 @@ def collate_fn_pad(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, t
             pad_pos_seq = torch.arange(1, pad_len + 1, dtype=curr_bar_pos.dtype)
             pad_bar_pos_vals = (last_pos + pad_pos_seq) % 16
             padded_bar_pos.append(torch.cat([curr_bar_pos, pad_bar_pos_vals], dim=0))
+
+            # Chroma: pad right with 0
+            chroma_pad = torch.zeros((pad_len, 12), dtype=curr_chroma.dtype)
+            padded_chromas.append(torch.cat([curr_chroma, chroma_pad], dim=0))
             
         else:
             padded_notes.append(curr_notes)
             padded_tempos.append(curr_tempo)
             padded_densities.append(curr_density)
             padded_bar_pos.append(curr_bar_pos)
+            padded_chromas.append(curr_chroma)
             
     notes_batch = torch.stack(padded_notes, dim=0)
     tempo_batch = torch.stack(padded_tempos, dim=0)
     density_batch = torch.stack(padded_densities, dim=0)
     bar_pos_batch = torch.stack(padded_bar_pos, dim=0)
+    chroma_batch = torch.stack(padded_chromas, dim=0)
     durations_tensor = torch.tensor(durations, dtype=torch.long)
     
     if shifts is not None:
         shifts_tensor = torch.tensor(shifts, dtype=torch.int)
-        return notes_batch, tempo_batch, density_batch, bar_pos_batch, durations_tensor, shifts_tensor
+        return notes_batch, tempo_batch, density_batch, bar_pos_batch, chroma_batch, durations_tensor, shifts_tensor
 
-    return notes_batch, tempo_batch, density_batch, bar_pos_batch, durations_tensor
+    return notes_batch, tempo_batch, density_batch, bar_pos_batch, chroma_batch, durations_tensor
 
 
 def create_dataloader(file_list_path: str = None, batch_size: int = None, 

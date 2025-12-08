@@ -5,7 +5,7 @@ This file provides backward compatibility by importing from the modular structur
 All model components are now organized in the models/ package for better readability.
 
 For new code, prefer importing directly from models package:
-    from models import PianoRollFractalGen, fractalmar_piano
+    from models import RecursiveFractalNetwork
 """
 
 # Import all components from the modular structure
@@ -22,8 +22,7 @@ from models import (
     PianoRollVelocityLoss,
     MlmLayer,
     # Main model
-    PianoRollFractalGen,
-    fractalmar_piano,
+    RecursiveFractalNetwork,
     # Utilities
     mask_by_order,
     scaled_dot_product_attention,
@@ -46,8 +45,7 @@ __all__ = [
     'PianoRollVelocityLoss',
     'MlmLayer',
     # Main model
-    'PianoRollFractalGen',
-    'fractalmar_piano',
+    'RecursiveFractalNetwork',
     # Utilities
     'mask_by_order',
     'scaled_dot_product_attention',
@@ -56,4 +54,3 @@ __all__ = [
     'conditional_generation',
     'inpainting_generation',
 ]
-

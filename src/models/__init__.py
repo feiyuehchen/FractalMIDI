@@ -10,7 +10,7 @@ from .blocks import Block, CausalBlock
 from .mar_generator import PianoRollMAR
 from .ar_generator import PianoRollAR
 from .velocity_loss import PianoRollVelocityLoss, MlmLayer
-from .fractal_gen import PianoRollFractalGen, fractalmar_piano
+from .fractal_gen import RecursiveFractalNetwork
 from .utils import mask_by_order, scaled_dot_product_attention, count_parameters
 from .generation import conditional_generation, inpainting_generation
 
@@ -27,8 +27,7 @@ __all__ = [
     'PianoRollVelocityLoss',
     'MlmLayer',
     # Main model
-    'PianoRollFractalGen',
-    'fractalmar_piano',
+    'RecursiveFractalNetwork',
     # Utilities
     'mask_by_order',
     'scaled_dot_product_attention',
@@ -37,4 +36,3 @@ __all__ = [
     'conditional_generation',
     'inpainting_generation',
 ]
-

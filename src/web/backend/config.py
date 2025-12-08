@@ -21,7 +21,7 @@ class ServerConfig:
 class ModelConfig:
     """Model configuration."""
     default_checkpoint: Optional[str] = None
-    checkpoint_dir: Path = field(default_factory=lambda: Path("outputs"))
+    checkpoint_dir: Path = field(default_factory=lambda: Path("experiments"))
     device: str = "cuda"  # or "cpu"
     max_batch_size: int = 4
     
@@ -84,7 +84,7 @@ class AppConfig:
     cors: CORSConfig = field(default_factory=CORSConfig)
     
     # Paths
-    project_root: Path = field(default_factory=lambda: Path(__file__).parent.parent.parent)
+    project_root: Path = field(default_factory=lambda: Path(__file__).parent.parent.parent.parent)
     static_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "frontend" / "static")
     templates_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "frontend" / "templates")
     

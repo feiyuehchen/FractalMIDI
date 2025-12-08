@@ -130,7 +130,8 @@ class InferenceEngine:
                     num_iter_list=request.num_iter_list or [8, 4, 2],
                     return_intermediates=request.create_gif,
                     callback=progress_callback,
-                    bar_pos=bar_pos
+                    bar_pos=bar_pos,
+                    filter_threshold=request.filter_threshold
                 )
 
         result = await loop.run_in_executor(None, run_sample)
@@ -212,7 +213,8 @@ class InferenceEngine:
                     initial_content=initial_content,
                     inpaint_mask=inpaint_mask,
                     return_intermediates=request.create_gif,
-                    bar_pos=bar_pos
+                    bar_pos=bar_pos,
+                    filter_threshold=request.filter_threshold
                 )
         
         result = await loop.run_in_executor(None, run_sample)
@@ -288,7 +290,8 @@ class InferenceEngine:
                     initial_content=initial_content,
                     inpaint_mask=inpaint_mask,
                     return_intermediates=request.create_gif,
-                    bar_pos=bar_pos
+                    bar_pos=bar_pos,
+                    filter_threshold=request.filter_threshold
                 )
 
         result = await loop.run_in_executor(None, run_sample)
@@ -362,7 +365,8 @@ class InferenceEngine:
                     initial_content=initial_content,
                     inpaint_mask=inpaint_mask,
                     return_intermediates=request.create_gif,
-                    bar_pos=bar_pos
+                    bar_pos=bar_pos,
+                    filter_threshold=request.filter_threshold
                 )
         
         result = await loop.run_in_executor(None, run_sample)
@@ -527,7 +531,8 @@ class InferenceEngine:
                 inpaint_mask=inpaint_mask,
                 return_intermediates=request.create_gif,
                 callback=callback,
-                bar_pos=bar_pos
+                bar_pos=bar_pos,
+                filter_threshold=request.filter_threshold
             )
             
         # Post-processing
@@ -551,7 +556,13 @@ class InferenceEngine:
         score.dump_midi(str(midi_path))
         
         img_path = job_dir / "output.png"
-        img = piano_roll_to_image(torch.from_numpy(piano_roll), apply_colormap=True, return_pil=True, min_height=512)
+        img = piano_roll_to_image(
+            torch.from_numpy(piano_roll_3ch), 
+            apply_colormap=True, 
+            return_pil=True, 
+            min_height=512,
+            composite_tempo=True
+        )
         img.save(str(img_path))
         
         return {

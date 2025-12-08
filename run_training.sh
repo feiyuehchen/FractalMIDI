@@ -14,6 +14,8 @@ echo ""
 
 # Set visible GPUs
 export CUDA_VISIBLE_DEVICES=0,1
+# Reduce memory fragmentation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Default config file
 CONFIG_FILE="${1:-config/train_default.yaml}"
